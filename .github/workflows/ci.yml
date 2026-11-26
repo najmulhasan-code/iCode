@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   check:
-    name: Type check, lint and format
+    name: Type check, lint, format and unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -30,6 +30,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run format:check
+      - run: npm test
 
   e2e:
     name: End-to-end tests
