@@ -12,12 +12,22 @@ function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
 }
 
+/**
+ * Reads the model settings from the user's own settings only.
+ *
+ * These settings decide where a saved API key is sent. A workspace is
+ * content that may come from someone else, for example a cloned repository,
+ * so a value set by a workspace or a folder is never used. The manifest
+ * declares the same settings with the `application` scope, which stops VS
+ * Code from accepting them there in the first place.
+ */
 export function readModelSettings(): ModelSettings {
   const config = vscode.workspace.getConfiguration('icode');
-  const chosen = config.get<unknown>('provider');
+  const user = (name: string): unknown => config.inspect<unknown>(name)?.globalValue;
+  const chosen = user('provider');
   const provider = MODEL_PROVIDERS.find((known) => known === chosen) ?? 'anthropic';
-  const model = text(config.get<unknown>('model'));
-  const baseUrl = text(config.get<unknown>('baseUrl'));
+  const model = text(user('model'));
+  const baseUrl = text(user('baseUrl'));
   return {
     provider,
     ...(model === undefined ? {} : { model }),

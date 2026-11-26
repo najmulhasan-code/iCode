@@ -124,6 +124,43 @@ describe('ClientConnection', () => {
     expect(sent).toHaveLength(1);
   });
 
+  it('keeps working when a notification listener throws', async () => {
+    const reported: unknown[] = [];
+    const connection = new ClientConnection({
+      write: () => undefined,
+      onNotification: () => {
+        throw new Error('listener failed');
+      },
+      onCallbackError: (error) => reported.push(error),
+    });
+    const result = connection.request('chat/send');
+    const lines = [
+      { jsonrpc: '2.0', method: 'chat/delta', params: { text: 'hi' } },
+      { jsonrpc: '2.0', id: 1, result: { stopReason: 'end' } },
+    ];
+    // Both lines arrive in one chunk: the response must not be lost.
+    connection.receive(lines.map((line) => `${JSON.stringify(line)}\n`).join(''));
+
+    await expect(result).resolves.toEqual({ stopReason: 'end' });
+    expect(reported).toHaveLength(1);
+  });
+
+  it('keeps working when the error listeners throw too', async () => {
+    const connection = new ClientConnection({
+      write: () => undefined,
+      onProtocolError: () => {
+        throw new Error('listener failed');
+      },
+      onCallbackError: () => {
+        throw new Error('reporter failed');
+      },
+    });
+    const result = connection.request('ping');
+    connection.receive('not json\n{"jsonrpc":"2.0","id":1,"result":"pong"}\n');
+
+    await expect(result).resolves.toBe('pong');
+  });
+
   it('rejects a request whose write fails', async () => {
     const connection = new ClientConnection({
       write: () => {

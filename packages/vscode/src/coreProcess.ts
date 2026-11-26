@@ -30,8 +30,10 @@ export interface CoreProcessOptions {
 export class CoreProcess {
   readonly #options: CoreProcessOptions;
   #child: ChildProcess | undefined;
+  #connection: ClientConnection | undefined;
   #session: Promise<CoreSession> | undefined;
   #generation = 0;
+  #disposed = false;
 
   constructor(options: CoreProcessOptions) {
     this.#options = options;
@@ -39,11 +41,18 @@ export class CoreProcess {
 
   /** Returns the running core, starting it and completing the handshake when needed. */
   session(): Promise<CoreSession> {
+    if (this.#disposed) {
+      return Promise.reject(new Error('iCode is shutting down'));
+    }
     this.#session ??= this.#start();
     return this.#session;
   }
 
+  /** Stops the core for good. Requests that are waiting are rejected, and no new core is started. */
   dispose(): void {
+    this.#disposed = true;
+    this.#connection?.close(new Error('iCode is shutting down'));
+    this.#connection = undefined;
     this.#child?.kill();
     this.#child = undefined;
     this.#session = undefined;
@@ -69,11 +78,16 @@ export class CoreProcess {
       onProtocolError: (error) => {
         log(`the core sent text that is not a protocol message: ${error.message}`);
       },
+      onCallbackError: () => {
+        log('handling a message from the core failed');
+      },
     });
+    this.#connection = connection;
     const ended = (reason: string): void => {
       connection.close(new Error(reason));
       if (this.#child === child) {
         this.#child = undefined;
+        this.#connection = undefined;
         this.#session = undefined;
       }
     };

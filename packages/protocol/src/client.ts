@@ -37,6 +37,11 @@ export interface ClientConnectionOptions {
   readonly onNotification?: (notification: NotificationMessage) => void;
   /** Receives text from the other side that is not a valid message. */
   readonly onProtocolError?: (error: ProtocolError) => void;
+  /**
+   * Receives an error thrown by one of the callbacks above. The connection
+   * keeps working: a faulty listener must not cost a later response.
+   */
+  readonly onCallbackError?: (error: unknown) => void;
 }
 
 /**
@@ -107,7 +112,7 @@ export class ClientConnection {
       if (item.ok) {
         this.#handleLine(item.line);
       } else {
-        this.#options.onProtocolError?.(item.error);
+        this.#reportProtocolError(item.error);
       }
     }
   }
@@ -131,13 +136,17 @@ export class ClientConnection {
       message = parseMessage(line);
     } catch (error) {
       if (error instanceof ProtocolError) {
-        this.#options.onProtocolError?.(error);
+        this.#reportProtocolError(error);
         return;
       }
       throw error;
     }
     if (isNotification(message)) {
-      this.#options.onNotification?.(message);
+      try {
+        this.#options.onNotification?.(message);
+      } catch (error) {
+        this.#reportCallbackError(error);
+      }
       return;
     }
     if (isRequest(message)) {
@@ -161,6 +170,22 @@ export class ClientConnection {
       request.reject(new RpcError(message.error.code, message.error.message, message.error.data));
     } else {
       request.resolve(message.result);
+    }
+  }
+
+  #reportProtocolError(error: ProtocolError): void {
+    try {
+      this.#options.onProtocolError?.(error);
+    } catch (thrown) {
+      this.#reportCallbackError(thrown);
+    }
+  }
+
+  #reportCallbackError(error: unknown): void {
+    try {
+      this.#options.onCallbackError?.(error);
+    } catch {
+      // A reporter that fails has nowhere left to report to.
     }
   }
 }

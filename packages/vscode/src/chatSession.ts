@@ -63,6 +63,7 @@ export class ChatSession {
   readonly #listeners = new Map<RequestId, (text: string) => void>();
   #applied: { readonly generation: number; readonly fingerprint: string } | undefined;
   #active: { readonly session: CoreSession; readonly id: RequestId } | undefined;
+  #sending = false;
 
   constructor(core: CoreProcess, secrets: vscode.SecretStorage) {
     this.#core = core;
@@ -86,6 +87,12 @@ export class ChatSession {
    * @throws ChatError with a message for the person using the editor.
    */
   async send(text: string, onText: (text: string) => void): Promise<StopReason> {
+    // One reply at a time: the settings sent to the core and the reply that
+    // follows must belong to the same request.
+    if (this.#sending) {
+      throw new ChatError('A reply is still being written. Wait for it or stop it first.');
+    }
+    this.#sending = true;
     try {
       const settings = readModelSettings();
       const apiKey = await this.#secrets.get(secretName(settings.provider));
@@ -114,12 +121,12 @@ export class ChatSession {
         return result.stopReason;
       } finally {
         this.#listeners.delete(sent.id);
-        if (this.#active.id === sent.id) {
-          this.#active = undefined;
-        }
+        this.#active = undefined;
       }
     } catch (error) {
       throw toChatError(error);
+    } finally {
+      this.#sending = false;
     }
   }
 

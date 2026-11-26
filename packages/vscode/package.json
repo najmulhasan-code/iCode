@@ -56,6 +56,7 @@
       "properties": {
         "icode.provider": {
           "type": "string",
+          "scope": "application",
           "enum": [
             "anthropic",
             "openai-compatible"
@@ -69,11 +70,13 @@
         },
         "icode.model": {
           "type": "string",
+          "scope": "application",
           "default": "",
           "description": "The model id, as the provider names it. Leave empty to use the default of the Anthropic provider. The OpenAI-compatible provider needs one."
         },
         "icode.baseUrl": {
           "type": "string",
+          "scope": "application",
           "default": "",
           "description": "The address of the API. Leave empty for the provider's own address. Set it for another host or a local server."
         }

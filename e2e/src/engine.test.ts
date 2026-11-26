@@ -127,6 +127,38 @@ export const engineTests: readonly TestCase[] = [
     },
   },
   {
+    name: 'engine: a second message is refused while a reply is still being written',
+    async run() {
+      // The server holds each reply back until the test releases it.
+      const held: ServerResponse[] = [];
+      const server = await startModelServer((response) => {
+        held.push(response);
+      });
+      try {
+        const extension = await api();
+        await extension.setApiKey('openai-compatible', 'e2e-test-key');
+        await withSettings(
+          { provider: 'openai-compatible', model: 'e2e-model', baseUrl: server.url },
+          async () => {
+            const first = extension.sendMessage('first');
+            await assert.rejects(extension.sendMessage('second'), /still being written/);
+            while (held.length === 0) {
+              await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+            for (const response of held) {
+              streamReply(response, ['done']);
+            }
+
+            assert.deepEqual(await first, { text: 'done', stopReason: 'end' });
+            assert.equal(server.requests.length, 1);
+          },
+        );
+      } finally {
+        await server.close();
+      }
+    },
+  },
+  {
     name: 'engine: a missing key is reported in plain words before anything is sent',
     async run() {
       const extension = await api();
