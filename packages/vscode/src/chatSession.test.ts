@@ -61,8 +61,32 @@ function setup(options: { holdKey?: boolean; holdCore?: boolean; key?: string | 
   return { chat, sent, state, key, core, fromCore, methods };
 }
 
+/**
+ * Plays the core while a send prepares: answers the requests that choose the
+ * model and begin the conversation, and returns the id of the chat request
+ * once it has been sent.
+ */
+async function prepare(context: ReturnType<typeof setup>): Promise<number> {
+  const answered = new Set<unknown>();
+  for (;;) {
+    await settle();
+    const last = context.sent.at(-1);
+    if (last === undefined || !('method' in last) || !('id' in last) || answered.has(last.id)) {
+      throw new Error('the message was not sent');
+    }
+    if (last.method === 'chat/send') {
+      return last.id as number;
+    }
+    answered.add(last.id);
+    context.fromCore({
+      id: last.id,
+      result: last.method === 'conversation/create' ? { conversationId: 'c1' } : {},
+    });
+  }
+}
+
 describe('ChatSession', () => {
-  it('chooses the model, sends the message and passes the reply on', async () => {
+  it('chooses the model, begins a conversation, sends the message and passes the reply on', async () => {
     const { chat, sent, fromCore } = setup();
     const pieces: string[] = [];
     const reply = chat.send('hello', (piece) => pieces.push(piece));
@@ -74,45 +98,55 @@ describe('ChatSession', () => {
     });
     fromCore({ id: 1, result: {} });
     await settle();
-    expect(sent[1]).toMatchObject({ id: 2, method: 'chat/send', params: { text: 'hello' } });
-    fromCore({ method: 'chat/delta', params: { requestId: 2, text: 'Hi' } });
+    expect(sent[1]).toMatchObject({ id: 2, method: 'conversation/create' });
+    fromCore({ id: 2, result: { conversationId: 'c1' } });
+    await settle();
+    expect(sent[2]).toMatchObject({
+      id: 3,
+      method: 'chat/send',
+      params: { conversationId: 'c1', text: 'hello' },
+    });
+    fromCore({ method: 'chat/delta', params: { requestId: 3, text: 'Hi' } });
     fromCore({ method: 'chat/delta', params: { requestId: 99, text: 'not mine' } });
-    fromCore({ method: 'chat/delta', params: { requestId: 2, text: ' there' } });
-    fromCore({ id: 2, result: { stopReason: 'end' } });
+    fromCore({ method: 'chat/delta', params: { requestId: 3, text: ' there' } });
+    fromCore({ id: 3, result: { stopReason: 'end' } });
 
     await expect(reply).resolves.toBe('end');
     expect(pieces).toEqual(['Hi', ' there']);
   });
 
-  it('chooses the model again only when the settings or the core have changed', async () => {
-    const { chat, state, fromCore, methods } = setup();
-    const run = async (id: number, expectsSet: boolean): Promise<void> => {
+  it('keeps one conversation, and chooses the model again only when something changed', async () => {
+    const context = setup();
+    const { chat, state, fromCore, methods } = context;
+    const run = async (): Promise<void> => {
       const reply = chat.send('hi', () => undefined);
-      await settle();
-      if (expectsSet) {
-        fromCore({ id, result: {} });
-        await settle();
-      }
-      fromCore({ id: expectsSet ? id + 1 : id, result: { stopReason: 'end' } });
+      fromCore({ id: await prepare(context), result: { stopReason: 'end' } });
       await reply;
     };
 
-    await run(1, true);
-    await run(3, false);
+    await run();
+    await run();
     state.settings = { provider: 'anthropic', model: 'another-model' };
-    await run(4, true);
+    await run();
+    // A core that was started again knows neither the model nor the conversation.
     state.generation = 2;
-    await run(6, true);
+    await run();
 
     expect(methods()).toEqual([
       'model/set',
+      'conversation/create',
       'chat/send',
       'chat/send',
       'model/set',
       'chat/send',
       'model/set',
+      'conversation/create',
       'chat/send',
     ]);
+    const conversations = context.sent
+      .filter((message) => 'method' in message && message.method === 'chat/send')
+      .map((message) => (message as { params: { conversationId: string } }).params.conversationId);
+    expect(conversations).toEqual(['c1', 'c1', 'c1', 'c1']);
   });
 
   it('refuses in plain words when no key is saved, and sends nothing', async () => {
@@ -125,34 +159,40 @@ describe('ChatSession', () => {
   });
 
   it('refuses a second message while a reply is being written', async () => {
-    const { chat, fromCore } = setup();
+    const context = setup();
+    const { chat, fromCore } = context;
     const first = chat.send('first', () => undefined);
 
     await expect(chat.send('second', () => undefined)).rejects.toThrow('still being written');
-    await settle();
-    fromCore({ id: 1, result: {} });
-    await settle();
-    fromCore({ id: 2, result: { stopReason: 'end' } });
+    fromCore({ id: await prepare(context), result: { stopReason: 'end' } });
     await expect(first).resolves.toBe('end');
     // The session is free again afterwards.
     const third = chat.send('third', () => undefined);
-    await settle();
-    fromCore({ id: 3, result: { stopReason: 'end' } });
+    fromCore({ id: await prepare(context), result: { stopReason: 'end' } });
     await expect(third).resolves.toBe('end');
   });
 
   it('turns a failed model request into a sentence about its cause', async () => {
-    const { chat, fromCore } = setup();
-    const reply = chat.send('hi', () => undefined);
-    await settle();
-    fromCore({ id: 1, result: {} });
-    await settle();
-    fromCore({
-      id: 2,
+    const context = setup();
+    const reply = context.chat.send('hi', () => undefined);
+    context.fromCore({
+      id: await prepare(context),
       error: { code: -32004, message: 'the model request failed', data: { kind: 'rate_limit' } },
     });
 
     await expect(reply).rejects.toThrow('limiting requests');
+  });
+
+  it('fails in plain words when the core does not name the conversation', async () => {
+    const { chat, fromCore, methods } = setup();
+    const reply = chat.send('hi', () => undefined);
+    await settle();
+    fromCore({ id: 1, result: {} });
+    await settle();
+    fromCore({ id: 2, result: {} });
+
+    await expect(reply).rejects.toThrow('did not start a conversation');
+    expect(methods()).toEqual(['model/set', 'conversation/create']);
   });
 });
 
@@ -189,27 +229,43 @@ describe('ChatSession.cancel', () => {
     expect(methods()).toEqual(['model/set']);
   });
 
-  it('asks the core to stop a reply that is being written', async () => {
-    const { chat, sent, fromCore } = setup();
+  it('stops a send that is beginning the conversation, which the next send then uses', async () => {
+    const context = setup();
+    const { chat, fromCore, methods } = context;
     const reply = chat.send('hi', () => undefined);
     await settle();
     fromCore({ id: 1, result: {} });
     await settle();
     chat.cancel();
+    fromCore({ id: 2, result: { conversationId: 'c1' } });
 
-    expect(sent.at(-1)).toEqual({ jsonrpc: '2.0', method: '$/cancel', params: { id: 2 } });
-    fromCore({ id: 2, result: { stopReason: 'cancelled' } });
+    await expect(reply).resolves.toBe('cancelled');
+    expect(methods()).toEqual(['model/set', 'conversation/create']);
+
+    const next = chat.send('again', () => undefined);
+    fromCore({ id: await prepare(context), result: { stopReason: 'end' } });
+    await expect(next).resolves.toBe('end');
+    expect(methods()).toEqual(['model/set', 'conversation/create', 'chat/send']);
+  });
+
+  it('asks the core to stop a reply that is being written', async () => {
+    const context = setup();
+    const { chat, sent, fromCore } = context;
+    const reply = chat.send('hi', () => undefined);
+    const id = await prepare(context);
+    chat.cancel();
+
+    expect(sent.at(-1)).toEqual({ jsonrpc: '2.0', method: '$/cancel', params: { id } });
+    fromCore({ id, result: { stopReason: 'cancelled' } });
     await expect(reply).resolves.toBe('cancelled');
   });
 
   it('does nothing when no reply is being written, and does not affect the next one', async () => {
-    const { chat, sent, fromCore } = setup();
+    const context = setup();
+    const { chat, sent, fromCore } = context;
     chat.cancel();
     const reply = chat.send('hi', () => undefined);
-    await settle();
-    fromCore({ id: 1, result: {} });
-    await settle();
-    fromCore({ id: 2, result: { stopReason: 'end' } });
+    fromCore({ id: await prepare(context), result: { stopReason: 'end' } });
 
     await expect(reply).resolves.toBe('end');
     expect(sent.some((message) => 'method' in message && message.method === '$/cancel')).toBe(

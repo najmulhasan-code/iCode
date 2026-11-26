@@ -120,12 +120,22 @@ export const engineTests: readonly TestCase[] = [
             assert.ok(request);
             assert.equal(request.authorization, 'Bearer e2e-test-key');
             assert.equal(request.body.model, 'e2e-model');
-            assert.deepEqual(request.body.messages, [{ role: 'user', content: 'hello' }]);
+            // Other tests use the same conversation, so only its end is compared.
+            const sentFirst = request.body.messages as unknown[];
+            assert.deepEqual(sentFirst.at(-1), { role: 'user', content: 'hello' });
 
-            // A second message reuses the running core and the model it was given.
+            // A second message reuses the running core and the model it was given,
+            // and it carries the first message and its reply.
             const second = await extension.sendMessage('again');
             assert.equal(second.text, 'Hello from the model');
             assert.equal(server.requests.length, 2);
+            const sentSecond = server.requests[1]?.body.messages as unknown[];
+            assert.deepEqual(sentSecond.slice(-3), [
+              { role: 'user', content: 'hello' },
+              { role: 'assistant', content: 'Hello from the model' },
+              { role: 'user', content: 'again' },
+            ]);
+            assert.equal(sentSecond.length, sentFirst.length + 2);
           },
         );
       } finally {
@@ -188,9 +198,9 @@ export const engineTests: readonly TestCase[] = [
               stopReason: 'end',
               shown: 'Hello from the panel',
             });
-            assert.deepEqual(server.requests.at(-1)?.body.messages, [
-              { role: 'user', content: 'hello from the panel' },
-            ]);
+            // Earlier tests left turns in the same conversation, so only its end is compared.
+            const sent = server.requests.at(-1)?.body.messages as unknown[];
+            assert.deepEqual(sent.at(-1), { role: 'user', content: 'hello from the panel' });
           },
         );
       } finally {

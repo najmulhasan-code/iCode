@@ -17,11 +17,12 @@ const INITIALIZE = {
   method: 'initialize',
   params: { protocolVersion: PROTOCOL_VERSION, client: { name: 'test', version: '0' } },
 };
-const chatRequest = (id: number) => ({
+const CREATE = { jsonrpc: '2.0', id: 90, method: 'conversation/create' };
+const chatRequest = (id: number, conversationId = 'c1') => ({
   jsonrpc: '2.0',
   id,
   method: 'chat/send',
-  params: { text: 'hi' },
+  params: { conversationId, text: 'hi' },
 });
 
 /** A queue that is read as an async stream and can be ended or made to fail. */
@@ -105,10 +106,15 @@ function connect(model: Model, write?: (text: string) => void | Promise<void>) {
       waiter();
     }
   };
+  let created = 0;
   const closed = serve({
     input: input.read(),
     write: write ?? record,
     model,
+    createConversationId: () => {
+      created += 1;
+      return `c${String(created)}`;
+    },
     info: { name: 'test-core', version: '0' },
     shutdownTimeoutMs: 200,
   });
@@ -150,6 +156,7 @@ describe('a model that does not cooperate', () => {
     const { model, streams } = controlledModel();
     const client = connect(model);
     client.send(INITIALIZE);
+    client.send(CREATE);
     client.send(chatRequest(2));
     await client.response(1);
     await settle();
@@ -163,6 +170,7 @@ describe('a model that does not cooperate', () => {
     const { model, streams } = controlledModel();
     const client = connect(model);
     client.send(INITIALIZE);
+    client.send(CREATE);
     client.send(chatRequest(2));
     await client.response(1);
     await settle();
@@ -176,6 +184,7 @@ describe('a model that does not cooperate', () => {
     const { model, streams } = controlledModel();
     const client = connect(model);
     client.send(INITIALIZE);
+    client.send(CREATE);
     client.send(chatRequest(2));
     await client.response(1);
     await settle();
@@ -189,6 +198,7 @@ describe('a model that does not cooperate', () => {
     const { model, streams } = controlledModel();
     const client = connect(model);
     client.send(INITIALIZE);
+    client.send(CREATE);
     client.send(chatRequest(2));
     await client.response(1);
     await settle();
@@ -209,6 +219,7 @@ describe('a model request that fails', () => {
     };
     const client = connect(failing);
     client.send(INITIALIZE);
+    client.send(CREATE);
     client.send(chatRequest(2));
     const response = await client.response(2);
 
@@ -224,6 +235,7 @@ describe('requests that overlap', () => {
     const { model, streams } = controlledModel();
     const client = connect(model);
     client.send(INITIALIZE);
+    client.send(CREATE);
     client.send(chatRequest(2));
     await client.response(1);
     await settle();
@@ -241,8 +253,10 @@ describe('requests that overlap', () => {
     const { model, streams } = controlledModel();
     const client = connect(model);
     client.send(INITIALIZE);
+    client.send(CREATE);
+    client.send({ ...CREATE, id: 91 });
     client.send(chatRequest(2));
-    client.send(chatRequest(3));
+    client.send(chatRequest(3, 'c2'));
     await client.response(1);
     await settle();
     streams[0]?.events.push(text('a1'));
@@ -267,6 +281,7 @@ describe('requests that overlap', () => {
     const { model, streams } = controlledModel();
     const client = connect(model);
     client.send(INITIALIZE);
+    client.send(CREATE);
     client.send(chatRequest(2));
     client.send(chatRequest(2));
     expect(await client.response(2)).toMatchObject({
@@ -288,6 +303,7 @@ describe('a connection that fails', () => {
     const { model, streams } = controlledModel();
     const client = connect(model);
     client.send(INITIALIZE);
+    client.send(CREATE);
     client.send(chatRequest(2));
     await client.response(1);
     await settle();
@@ -313,6 +329,7 @@ describe('a connection that fails', () => {
       client.record(written);
     });
     client.send(INITIALIZE);
+    client.send(CREATE);
     client.send(chatRequest(2));
     await client.response(1);
     await settle();
@@ -320,8 +337,51 @@ describe('a connection that fails', () => {
 
     await expect(client.closed).rejects.toThrow('write failed');
     expect(streams[0]?.signal.aborted).toBe(true);
-    expect(writes).toBe(2);
+    expect(writes).toBe(3);
     expect(client.responses(2)).toHaveLength(0);
+  });
+});
+
+describe('a turn whose answer is still being written', () => {
+  it('does not end the next turn of the same conversation when its own cleanup runs', async () => {
+    const { model, streams } = controlledModel();
+    let release: (() => void) | undefined;
+    const client = connect(model, (written) => {
+      client.record(written);
+      // The answer to the first chat request reaches the client, but its write stays pending.
+      if (written.includes('"id":2,') && release === undefined) {
+        return new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      return undefined;
+    });
+    client.send(INITIALIZE);
+    client.send(CREATE);
+    client.send(chatRequest(2));
+    await client.response(1);
+    await settle();
+    streams[0]?.events.push(text('reply-1'));
+    streams[0]?.events.push(END);
+    await client.response(2);
+
+    // The client has its answer, so it sends the next message at once.
+    client.send(chatRequest(3));
+    await settle();
+    expect(streams).toHaveLength(2);
+    release?.();
+    await settle();
+
+    // The second turn is still running, so a third message must be refused.
+    client.send(chatRequest(4));
+    await settle();
+    streams[1]?.events.push(text('reply-2'));
+    streams[1]?.events.push(END);
+    await client.response(3);
+    expect(await client.response(4)).toMatchObject({
+      error: { code: CoreErrorCode.ConversationBusy },
+    });
+    expect(streams).toHaveLength(2);
   });
 });
 
@@ -342,6 +402,7 @@ describe('a client that reads slowly', () => {
       });
     });
     client.send(INITIALIZE);
+    client.send(CREATE);
     client.send(chatRequest(2));
     await client.response(1);
     await settle();
@@ -375,6 +436,7 @@ describe('a client that reads slowly', () => {
       });
     });
     client.send(INITIALIZE);
+    client.send(CREATE);
     client.send(chatRequest(2));
     await client.response(1);
     await settle();

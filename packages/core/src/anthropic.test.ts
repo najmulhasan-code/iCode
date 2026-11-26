@@ -429,8 +429,15 @@ describe('a failed request', () => {
         method: 'initialize',
         params: { protocolVersion: PROTOCOL_VERSION, client: { name: 'test', version: '0' } },
       };
-      const chat = { jsonrpc: '2.0', id: 2, method: 'chat/send', params: { text: 'hi' } };
+      const create = { jsonrpc: '2.0', id: 90, method: 'conversation/create' };
+      const chat = {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'chat/send',
+        params: { conversationId: 'c1', text: 'hi' },
+      };
       yield JSON.stringify(initialize) + String.fromCharCode(10);
+      yield JSON.stringify(create) + String.fromCharCode(10);
       yield JSON.stringify(chat) + String.fromCharCode(10);
       await done;
     }
@@ -443,6 +450,7 @@ describe('a failed request', () => {
         }
       },
       model: modelFor(api.url),
+      createConversationId: () => 'c1',
       info: { name: 'test-core', version: '0' },
       log: (text) => logged.push(text),
     });

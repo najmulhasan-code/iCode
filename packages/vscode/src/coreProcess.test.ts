@@ -1,3 +1,4 @@
+import { CoreErrorCode } from '@icode/protocol';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CoreProcess } from './coreProcess';
 
@@ -36,9 +37,9 @@ describe('CoreProcess', () => {
     const { connection } = await core.session();
 
     // No model has been chosen, so the core refuses in its own words.
-    await expect(connection.request('chat/send', { text: 'hi' })).rejects.toMatchObject({
-      name: 'RpcError',
-    });
+    await expect(
+      connection.request('chat/send', { conversationId: 'none', text: 'hi' }),
+    ).rejects.toMatchObject({ name: 'RpcError', code: CoreErrorCode.ModelNotSet });
   });
 
   it('does not start a core once it has been disposed', async () => {
