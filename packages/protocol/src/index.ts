@@ -1,3 +1,5 @@
+export * from './messages.js';
+
 /**
  * Version of the message protocol spoken between the core and its clients.
  *
