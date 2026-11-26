@@ -5,6 +5,7 @@ import { DEFAULT_ANTHROPIC_MODEL, createAnthropicModel } from './anthropic.js';
 import { PROTOCOL_VERSION } from '@icode/protocol';
 import type { Model, ModelEvent } from './model.js';
 import { serve } from './server.js';
+import { type Behaviour, describeModelContract } from './testing/modelContract.js';
 
 interface SeenRequest {
   readonly method: string | undefined;
@@ -437,4 +438,43 @@ describe('a failed request', () => {
       kind: 'connection',
     });
   });
+});
+
+const STOP_REASON_BY_STOP = {
+  end: 'end_turn',
+  max_tokens: 'max_tokens',
+  refusal: 'refusal',
+} as const;
+const ERROR_TYPE_BY_STATUS: Readonly<Record<number, string>> = {
+  400: 'invalid_request_error',
+  401: 'authentication_error',
+  403: 'permission_error',
+  404: 'not_found_error',
+  429: 'rate_limit_error',
+  500: 'api_error',
+};
+
+describeModelContract('Anthropic adapter', {
+  apiKey: 'test-key',
+  createModel: (url, retries) => modelFor(url, { retries }),
+  respond(response: ServerResponse, behaviour: Behaviour): void {
+    if ('reply' in behaviour) {
+      sendReply(response, behaviour.reply, STOP_REASON_BY_STOP[behaviour.stop]);
+    } else if ('stall' in behaviour) {
+      startStream(response);
+      writeEvents(response, replyEvents(behaviour.stall, 'end_turn').slice(0, -3));
+    } else {
+      const type = ERROR_TYPE_BY_STATUS[behaviour.status] ?? 'api_error';
+      response.writeHead(behaviour.status, {
+        'content-type': 'application/json',
+        'retry-after-ms': '1',
+      });
+      response.end(
+        JSON.stringify({
+          type: 'error',
+          error: { type, message: behaviour.message ?? 'stand-in failure' },
+        }),
+      );
+    }
+  },
 });
