@@ -14,20 +14,23 @@
     "node": ">=22.13.0"
   },
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "e2e"
   ],
   "scripts": {
     "build": "tsc --build",
     "typecheck": "tsc --build",
-    "lint": "eslint eslint.config.js packages",
-    "format": "prettier --write \"*.{js,json}\" \"{README,CONTRIBUTING}.md\" .github packages",
-    "format:check": "prettier --check \"*.{js,json}\" \"{README,CONTRIBUTING}.md\" .github packages",
-    "check": "npm run typecheck && npm run lint && npm run format:check"
+    "lint": "eslint eslint.config.js packages e2e",
+    "format": "prettier --write \"*.{js,json}\" \"{README,CONTRIBUTING}.md\" .github packages e2e",
+    "format:check": "prettier --check \"*.{js,json}\" \"{README,CONTRIBUTING}.md\" .github packages e2e",
+    "check": "npm run typecheck && npm run lint && npm run format:check",
+    "test:e2e": "npm run build && npm run test --workspace @icode/e2e"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@types/node": "22.20.5",
     "@types/vscode": "1.134.0",
+    "@vscode/test-electron": "3.1.0",
     "eslint": "10.15.0",
     "prettier": "3.10.1",
     "typescript": "6.0.3",

@@ -1,0 +1,10 @@
+{
+  "name": "@icode/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "End-to-end tests that run the iCode extension inside VS Code",
+  "license": "MIT",
+  "scripts": {
+    "test": "node dist/runTests.js"
+  }
+}
