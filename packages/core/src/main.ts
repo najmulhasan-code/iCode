@@ -1,4 +1,7 @@
-import { createFixedModel } from './fixedModel.js';
+import type { SetModelParams } from '@icode/protocol';
+import { createAnthropicModel } from './anthropic.js';
+import type { Model } from './model.js';
+import { createOpenAICompatibleModel } from './openai.js';
 import { serve } from './server.js';
 
 /** Writes to standard output and resolves once the text has been handed to the system. */
@@ -14,6 +17,24 @@ function writeToStdout(text: string): Promise<void> {
   });
 }
 
+/** Builds the adapter for the provider the client chose. */
+function createModel(params: SetModelParams): Model {
+  const shared = {
+    apiKey: params.apiKey,
+    ...(params.baseUrl === undefined ? {} : { baseURL: params.baseUrl }),
+  };
+  if (params.provider === 'anthropic') {
+    return createAnthropicModel({
+      ...shared,
+      ...(params.model === undefined ? {} : { model: params.model }),
+    });
+  }
+  if (params.model === undefined) {
+    throw new Error('the openai-compatible provider needs a model name');
+  }
+  return createOpenAICompatibleModel({ ...shared, model: params.model });
+}
+
 /**
  * Entry point of the core process. The client talks to it over standard
  * input and output. Diagnostics go to standard error.
@@ -26,8 +47,7 @@ async function main(): Promise<void> {
   await serve({
     input: process.stdin as AsyncIterable<string>,
     write: writeToStdout,
-    // Provider adapters are not connected yet, so the core answers with a fixed reply.
-    model: createFixedModel(['The core is running. ', 'No model provider is connected yet.']),
+    createModel,
     info: { name: 'icode-core', version: '0.0.0' },
     log: (text) => {
       process.stderr.write(`${text}\n`);
