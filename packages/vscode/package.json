@@ -1,0 +1,42 @@
+{
+  "name": "icode",
+  "displayName": "iCode",
+  "description": "An open-source coding agent for Visual Studio Code",
+  "version": "0.0.0",
+  "private": true,
+  "publisher": "najmulhasan-code",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/najmulhasan-code/iCode.git",
+    "directory": "packages/vscode"
+  },
+  "engines": {
+    "vscode": "^1.134.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "icode",
+          "title": "iCode",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "icode": [
+        {
+          "type": "webview",
+          "id": "icode.chat",
+          "name": "Chat"
+        }
+      ]
+    }
+  }
+}

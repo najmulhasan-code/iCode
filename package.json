@@ -1,5 +1,5 @@
 {
-  "name": "icode",
+  "name": "icode-workspace",
   "version": "0.0.0",
   "private": true,
   "description": "An open-source coding agent for Visual Studio Code",
@@ -26,6 +26,8 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@types/node": "22.20.5",
+    "@types/vscode": "1.134.0",
     "eslint": "10.15.0",
     "prettier": "3.10.1",
     "typescript": "6.0.3",
