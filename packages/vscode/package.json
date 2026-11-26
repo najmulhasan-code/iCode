@@ -38,6 +38,53 @@
           "name": "Chat"
         }
       ]
+    },
+    "commands": [
+      {
+        "command": "icode.setApiKey",
+        "title": "Set API Key",
+        "category": "iCode"
+      },
+      {
+        "command": "icode.clearApiKey",
+        "title": "Remove API Key",
+        "category": "iCode"
+      }
+    ],
+    "configuration": {
+      "title": "iCode",
+      "properties": {
+        "icode.provider": {
+          "type": "string",
+          "scope": "application",
+          "enum": [
+            "anthropic",
+            "openai-compatible"
+          ],
+          "enumDescriptions": [
+            "The Anthropic API.",
+            "OpenAI, another hosted provider, or a local server with an OpenAI-compatible API."
+          ],
+          "default": "anthropic",
+          "description": "The kind of API the model is reached through."
+        },
+        "icode.model": {
+          "type": "string",
+          "scope": "application",
+          "default": "",
+          "description": "The model id, as the provider names it. Leave empty to use the default of the Anthropic provider. The OpenAI-compatible provider needs one."
+        },
+        "icode.baseUrl": {
+          "type": "string",
+          "scope": "application",
+          "default": "",
+          "description": "The address of the API. Leave empty for the provider's own address. Set it for another host or a local server."
+        }
+      }
     }
+  },
+  "dependencies": {
+    "@icode/core": "0.0.0",
+    "@icode/protocol": "0.0.0"
   }
 }
