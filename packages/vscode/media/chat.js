@@ -6,6 +6,10 @@
 //
 // Each message the user sends gets a number. Every answer from the extension
 // names that number, and an answer for any other number is ignored.
+//
+// A conversation put aside by "New Chat" keeps its elements and the unsent
+// text of the composer here, under a key the extension chose, so that it can
+// be shown again exactly as it was.
 (function () {
   const vscode = acquireVsCodeApi();
   const messages = document.getElementById('messages');
@@ -24,6 +28,8 @@
   let nextId = 1;
   /** The request that is being answered: its number and the element its reply goes into. */
   let current = null;
+  /** Conversations put aside, by key: their elements and the composer text. */
+  const aside = new Map();
 
   function add(kind, text) {
     const element = document.createElement('div');
@@ -73,6 +79,51 @@
     vscode.postMessage({ type: 'shown', id, text: kind === 'error' ? note : shown });
   }
 
+  /** Takes the shown conversation off the page and returns it. */
+  function takeShown() {
+    const elements = Array.from(messages.children).filter((element) => element !== welcome);
+    for (const element of elements) {
+      element.remove();
+    }
+    const shown = { elements, draft: input.value };
+    input.value = '';
+    return shown;
+  }
+
+  function show(conversation) {
+    for (const element of conversation.elements) {
+      messages.append(element);
+    }
+    welcome.hidden = conversation.elements.length > 0;
+    if (conversation.draft !== '') {
+      input.value = conversation.draft;
+    }
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  // The extension switches conversations only once no reply is being written.
+  function newChat(stashKey) {
+    aside.set(stashKey, takeShown());
+    welcome.hidden = false;
+    updateControls();
+    input.focus();
+  }
+
+  function openChat(key, stashKey) {
+    const conversation = aside.get(key);
+    aside.delete(key);
+    const shown = takeShown();
+    if (stashKey !== undefined) {
+      aside.set(stashKey, shown);
+    } else {
+      // An empty conversation is dropped, but text typed into it stays.
+      input.value = shown.draft;
+    }
+    show(conversation ?? { elements: [], draft: '' });
+    updateControls();
+    input.focus();
+  }
+
   sendButton.addEventListener('click', () => {
     if (submit(input.value)) {
       input.value = '';
@@ -97,6 +148,18 @@
       if (!submit(message.text, message.token)) {
         vscode.postMessage({ type: 'rejected', token: message.token });
       }
+      return;
+    }
+    if (message.type === 'newChat') {
+      newChat(message.stashKey);
+      return;
+    }
+    if (message.type === 'openChat') {
+      openChat(message.key, message.stashKey);
+      return;
+    }
+    if (message.type === 'focus') {
+      input.focus();
       return;
     }
     if (current === null || message.id !== current.id) {

@@ -49,8 +49,28 @@
         "command": "icode.clearApiKey",
         "title": "Remove API Key",
         "category": "iCode"
+      },
+      {
+        "command": "icode.newChat",
+        "title": "New Chat",
+        "category": "iCode",
+        "icon": "$(add)"
+      },
+      {
+        "command": "icode.reopenPreviousChat",
+        "title": "Reopen Previous Chat",
+        "category": "iCode"
       }
     ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "icode.newChat",
+          "when": "view == icode.chat",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "iCode",
       "properties": {

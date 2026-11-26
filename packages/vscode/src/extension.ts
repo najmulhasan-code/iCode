@@ -1,7 +1,12 @@
 import type { ModelProvider, StopReason } from '@icode/protocol';
 import * as vscode from 'vscode';
 import { ChatSession } from './chatSession';
-import { ChatPanelController, type SubmitResult } from './chatPanel';
+import {
+  ChatPanelController,
+  type NewChatResult,
+  type ReopenResult,
+  type SubmitResult,
+} from './chatPanel';
 import { ChatViewProvider } from './chatView';
 import { CoreProcess } from './coreProcess';
 import { readModelSettings, secretName } from './settings';
@@ -12,6 +17,10 @@ export interface TestApi {
   sendMessage(text: string): Promise<{ readonly text: string; readonly stopReason: StopReason }>;
   /** Submits a message through the open chat panel, as if it had been typed there. */
   submitInChatView(text: string): Promise<SubmitResult>;
+  /** Starts a new chat in the panel, without the notification. */
+  newChat(): Promise<NewChatResult>;
+  /** Reopens a chat in the panel, as Undo or the command does. */
+  reopenChat(key?: number): Promise<ReopenResult>;
 }
 
 async function setApiKey(secrets: vscode.SecretStorage): Promise<void> {
@@ -26,13 +35,44 @@ async function setApiKey(secrets: vscode.SecretStorage): Promise<void> {
     return;
   }
   await secrets.store(secretName(provider), apiKey.trim());
-  void vscode.window.showInformationMessage(`iCode: the API key for ${provider} is saved.`);
+  void vscode.window.showInformationMessage(`The API key for ${provider} is saved.`);
 }
 
 async function clearApiKey(secrets: vscode.SecretStorage): Promise<void> {
   const { provider } = readModelSettings();
   await secrets.delete(secretName(provider));
-  void vscode.window.showInformationMessage(`iCode: the API key for ${provider} is removed.`);
+  void vscode.window.showInformationMessage(`The API key for ${provider} is removed.`);
+}
+
+/** Reopens a chat and says so when it cannot be reopened. */
+async function reopenChat(panel: ChatPanelController, key?: number): Promise<void> {
+  let result = await panel.reopen(key);
+  if (result === 'closed') {
+    await vscode.commands.executeCommand('icode.chat.focus');
+    result = 'gone';
+  }
+  if (result === 'none') {
+    void vscode.window.showInformationMessage('There is no previous chat to reopen.');
+  } else if (result === 'gone') {
+    void vscode.window.showWarningMessage('That chat can no longer be reopened.');
+  }
+}
+
+/** Starts a new chat and offers to undo it. */
+async function newChat(panel: ChatPanelController): Promise<void> {
+  const result = await panel.newChat();
+  if (result.kind === 'closed') {
+    // Opening the panel shows an empty chat.
+    await vscode.commands.executeCommand('icode.chat.focus');
+    return;
+  }
+  if (result.kind === 'started') {
+    // Each notification brings back the one conversation it was shown for.
+    const choice = await vscode.window.showInformationMessage('Started a new chat.', 'Undo');
+    if (choice === 'Undo') {
+      await reopenChat(panel, result.previous);
+    }
+  }
 }
 
 /**
@@ -72,6 +112,8 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
     }),
     vscode.commands.registerCommand('icode.setApiKey', () => setApiKey(context.secrets)),
     vscode.commands.registerCommand('icode.clearApiKey', () => clearApiKey(context.secrets)),
+    vscode.commands.registerCommand('icode.newChat', () => newChat(panel)),
+    vscode.commands.registerCommand('icode.reopenPreviousChat', () => reopenChat(panel)),
   );
 
   if (context.extensionMode !== vscode.ExtensionMode.Test) {
@@ -89,5 +131,7 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
       return { text: reply, stopReason };
     },
     submitInChatView: (text) => panel.submit(text),
+    newChat: () => panel.newChat(),
+    reopenChat: (key) => panel.reopen(key),
   };
 }

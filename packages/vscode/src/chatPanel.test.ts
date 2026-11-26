@@ -1,21 +1,40 @@
 import type { StopReason } from '@icode/protocol';
 import { describe, expect, it } from 'vitest';
 import { type ChatBackend, ChatPanelController, type PanelMessage } from './chatPanel';
+import type { ConversationRef } from './chatSession';
 
-/** A chat backend the test drives: each send waits until the test ends it. */
+/**
+ * A chat backend the test drives: each send waits until the test ends it.
+ * Like the real session, a send begins a conversation when there is none.
+ */
 function fakeChat() {
   const sends: {
     text: string;
+    conversation: string;
     piece: (text: string) => void;
     end: (stopReason: StopReason) => void;
     fail: (message: string) => void;
   }[] = [];
   let cancels = 0;
+  let created = 0;
+  const state: {
+    current: ConversationRef | undefined;
+    setAsides: number;
+    /** Conversations with these ids can no longer be resumed. */
+    gone: Set<string>;
+    /** While set, setting aside waits for it. */
+    hold?: Promise<void> | undefined;
+  } = { current: undefined, setAsides: 0, gone: new Set() };
   const backend: ChatBackend = {
     send: (text, onText) =>
       new Promise((resolve, reject) => {
+        if (state.current === undefined) {
+          created += 1;
+          state.current = { generation: 1, id: `c${String(created)}` };
+        }
         sends.push({
           text,
+          conversation: state.current.id,
           piece: onText,
           end: resolve,
           fail: (message) => {
@@ -26,8 +45,22 @@ function fakeChat() {
     cancel: () => {
       cancels += 1;
     },
+    setAside: async () => {
+      state.setAsides += 1;
+      await state.hold;
+      const current = state.current;
+      state.current = undefined;
+      return current;
+    },
+    resume: (conversation) => {
+      if (conversation !== undefined && state.gone.has(conversation.id)) {
+        return Promise.resolve(false);
+      }
+      state.current = conversation;
+      return Promise.resolve(true);
+    },
   };
-  return { backend, sends, cancels: () => cancels };
+  return { backend, sends, state, cancels: () => cancels };
 }
 
 function page() {
@@ -290,5 +323,189 @@ describe('submit', () => {
     controller.detach(port);
 
     await expect(result).resolves.toEqual({ error: 'The chat panel was closed.' });
+  });
+});
+
+describe('a new chat', () => {
+  /** Sends one message from the page and lets its reply end. */
+  async function exchange(context: ReturnType<typeof setup>, id: number, text: string) {
+    context.controller.handle(context.port, { type: 'send', id, text });
+    context.sends.at(-1)?.end('end');
+    await settle();
+  }
+
+  async function started(context: ReturnType<typeof setup>): Promise<number> {
+    const result = await context.controller.newChat();
+    if (result.kind !== 'started') {
+      throw new Error(`no new chat was started: ${result.kind}`);
+    }
+    return result.previous;
+  }
+
+  it('changes nothing when nothing was sent yet, and puts the cursor in the composer', async () => {
+    const context = setup();
+
+    await expect(context.controller.newChat()).resolves.toEqual({ kind: 'empty' });
+    expect(context.port.posted).toEqual([{ type: 'focus' }]);
+    expect(context.state.setAsides).toBe(0);
+  });
+
+  it('puts the shown conversation aside, and the next message begins a new one', async () => {
+    const context = setup();
+    await exchange(context, 1, 'first');
+
+    const previous = await started(context);
+    expect(context.port.posted.at(-1)).toEqual({ type: 'newChat', stashKey: previous });
+    await exchange(context, 2, 'second');
+    expect(context.sends.map((send) => send.conversation)).toEqual(['c1', 'c2']);
+  });
+
+  it('stops a reply that is being written, and switches only after its end reached the page', async () => {
+    const context = setup();
+    context.controller.handle(context.port, { type: 'send', id: 1, text: 'first' });
+    const switching = context.controller.newChat();
+    await settle();
+    expect(context.cancels()).toBe(1);
+    expect(context.port.posted).toEqual([]);
+
+    context.sends[0]?.end('cancelled');
+    await switching;
+    expect(context.port.posted.map((message) => message.type)).toEqual(['end', 'newChat']);
+  });
+
+  it('refuses a message sent while the chat is being switched, and accepts one right after', async () => {
+    const context = setup();
+    await exchange(context, 1, 'first');
+    let release!: () => void;
+    context.state.hold = new Promise((resolve) => {
+      release = resolve;
+    });
+    const switching = context.controller.newChat();
+    await settle();
+    context.controller.handle(context.port, { type: 'send', id: 2, text: 'too early' });
+    release();
+    await switching;
+    context.controller.handle(context.port, { type: 'send', id: 3, text: 'right after' });
+    expect(context.sends.at(-1)?.text).toBe('right after');
+
+    expect(context.sends).toHaveLength(2);
+    expect(context.port.posted).toContainEqual({
+      type: 'error',
+      id: 2,
+      message: 'The chat is being switched. Send the message again in a moment.',
+    });
+  });
+
+  it('is undone by reopening the previous conversation, which keeps the shown one too', async () => {
+    const context = setup();
+    await exchange(context, 1, 'first');
+    const previous = await started(context);
+    await exchange(context, 2, 'second');
+    const sendsBefore = context.sends.length;
+
+    await expect(context.controller.reopen(previous)).resolves.toBe('reopened');
+    const open = context.port.posted.at(-1) as { type: string; key: number; stashKey: number };
+    expect(open).toMatchObject({ type: 'openChat', key: previous });
+    // Reopening runs nothing again.
+    expect(context.sends).toHaveLength(sendsBefore);
+    await exchange(context, 3, 'third');
+    expect(context.sends.at(-1)?.conversation).toBe('c1');
+
+    // The conversation that was shown can be reopened in turn.
+    await expect(context.controller.reopen(open.stashKey)).resolves.toBe('reopened');
+    await exchange(context, 4, 'fourth');
+    expect(context.sends.at(-1)?.conversation).toBe('c2');
+  });
+
+  it('drops an empty conversation when another is reopened', async () => {
+    const context = setup();
+    await exchange(context, 1, 'first');
+    const previous = await started(context);
+
+    await expect(context.controller.reopen(previous)).resolves.toBe('reopened');
+    expect(context.port.posted.at(-1)).toEqual({ type: 'openChat', key: previous });
+    await expect(context.controller.reopen()).resolves.toBe('none');
+  });
+
+  it('keeps each Undo bound to its own conversation after later new chats', async () => {
+    const context = setup();
+    await exchange(context, 1, 'a');
+    const first = await started(context);
+    await exchange(context, 2, 'b');
+    const second = await started(context);
+    await exchange(context, 3, 'c');
+
+    await expect(context.controller.reopen(first)).resolves.toBe('reopened');
+    await exchange(context, 4, 'back to a');
+    expect(context.sends.at(-1)?.conversation).toBe('c1');
+    await expect(context.controller.reopen(second)).resolves.toBe('reopened');
+    await exchange(context, 5, 'back to b');
+    expect(context.sends.at(-1)?.conversation).toBe('c2');
+  });
+
+  it('reopens the conversation put aside last when no key is given', async () => {
+    const context = setup();
+    await exchange(context, 1, 'a');
+    await started(context);
+    await exchange(context, 2, 'b');
+    await started(context);
+
+    await expect(context.controller.reopen()).resolves.toBe('reopened');
+    await exchange(context, 3, 'back');
+    expect(context.sends.at(-1)?.conversation).toBe('c2');
+  });
+
+  it('says so when a conversation cannot be reopened, and keeps the shown one', async () => {
+    const context = setup();
+    await exchange(context, 1, 'a');
+    const previous = await started(context);
+    await exchange(context, 2, 'b');
+    context.state.gone.add('c1');
+    const posted = context.port.posted.length;
+
+    await expect(context.controller.reopen(previous)).resolves.toBe('gone');
+    await expect(context.controller.reopen(9999)).resolves.toBe('gone');
+    expect(context.port.posted).toHaveLength(posted);
+    await exchange(context, 3, 'c');
+    expect(context.sends.at(-1)?.conversation).toBe('c2');
+  });
+
+  it('does nothing without an open page', async () => {
+    const controller = new ChatPanelController(fakeChat().backend);
+
+    await expect(controller.newChat()).resolves.toEqual({ kind: 'closed' });
+    await expect(controller.reopen()).resolves.toBe('closed');
+  });
+});
+
+describe('a page that opens after a page that showed a conversation', () => {
+  it('begins a new conversation, because the new page shows none', async () => {
+    const context = setup();
+    context.controller.handle(context.port, { type: 'send', id: 1, text: 'first' });
+    context.sends[0]?.end('end');
+    await settle();
+    const result = await context.controller.newChat();
+    const previous = (result as { previous: number }).previous;
+    context.controller.handle(context.port, { type: 'send', id: 2, text: 'second' });
+    context.sends[1]?.end('end');
+    await settle();
+    const setAsides = context.state.setAsides;
+
+    const second = page();
+    context.controller.attach(second);
+    await settle();
+    expect(context.state.setAsides).toBe(setAsides + 1);
+    // What the closed page put aside is gone with it.
+    await expect(context.controller.reopen(previous)).resolves.toBe('gone');
+    context.controller.handle(second, { type: 'send', id: 1, text: 'fresh' });
+    expect(context.sends.at(-1)?.conversation).toBe('c3');
+  });
+
+  it('keeps the conversation when the page before it showed nothing', async () => {
+    const context = setup();
+    context.controller.attach(page());
+    await settle();
+
+    expect(context.state.setAsides).toBe(0);
   });
 });

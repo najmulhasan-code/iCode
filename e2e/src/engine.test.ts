@@ -17,6 +17,8 @@ interface TestApi {
     /** What the page displayed for this message. */
     readonly shown?: string;
   }>;
+  newChat(): Promise<{ readonly kind: string; readonly previous?: number }>;
+  reopenChat(key?: number): Promise<string>;
 }
 
 interface SeenRequest {
@@ -219,6 +221,50 @@ export const engineTests: readonly TestCase[] = [
         assert.match(outcome.error ?? '', /No API key is set/);
         assert.match(outcome.shown ?? '', /No API key is set/);
       });
+    },
+  },
+  {
+    name: 'chat panel: a new chat starts an empty conversation, and Undo brings the old one back',
+    async run() {
+      const server = await startModelServer((response) => {
+        streamReply(response, ['Noted.']);
+      });
+      try {
+        const extension = await api();
+        await extension.setApiKey('openai-compatible', 'e2e-test-key');
+        await vscode.commands.executeCommand('icode.chat.focus');
+        await withSettings(
+          { provider: 'openai-compatible', model: 'e2e-model', baseUrl: server.url },
+          async () => {
+            const commands = await vscode.commands.getCommands(true);
+            assert.ok(commands.includes('icode.newChat'));
+            assert.ok(commands.includes('icode.reopenPreviousChat'));
+
+            const first = await extension.submitInChatView('the word is apple');
+            assert.equal(first.stopReason, 'end');
+            const started = await extension.newChat();
+            assert.equal(started.kind, 'started');
+
+            // The new chat carries nothing from the old one.
+            await extension.submitInChatView('a new topic');
+            assert.deepEqual(server.requests.at(-1)?.body.messages, [
+              { role: 'user', content: 'a new topic' },
+            ]);
+
+            assert.equal(await extension.reopenChat(started.previous), 'reopened');
+            await extension.submitInChatView('what was the word?');
+            const sent = server.requests.at(-1)?.body.messages as unknown[];
+            assert.deepEqual(sent.slice(-3), [
+              { role: 'user', content: 'the word is apple' },
+              { role: 'assistant', content: 'Noted.' },
+              { role: 'user', content: 'what was the word?' },
+            ]);
+            assert.ok(!JSON.stringify(sent).includes('a new topic'));
+          },
+        );
+      } finally {
+        await server.close();
+      }
     },
   },
   {
