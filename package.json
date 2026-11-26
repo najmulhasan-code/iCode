@@ -1,0 +1,26 @@
+{
+  "name": "icode",
+  "version": "0.0.0",
+  "private": true,
+  "description": "An open-source coding agent for Visual Studio Code",
+  "license": "MIT",
+  "author": "Najmul Hasan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/najmulhasan-code/iCode.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --build"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}
