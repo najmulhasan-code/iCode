@@ -11,6 +11,7 @@
   ],
   "dependencies": {
     "@anthropic-ai/sdk": "1.10.0",
-    "@icode/protocol": "0.0.0"
+    "@icode/protocol": "0.0.0",
+    "openai": "7.60.0"
   }
 }
