@@ -1,7 +1,7 @@
 import type { ModelProvider, StopReason } from '@icode/protocol';
 import * as vscode from 'vscode';
 import { ChatSession } from './chatSession';
-import { ChatViewProvider } from './chatView';
+import { type ChatOutcome, ChatViewProvider } from './chatView';
 import { CoreProcess } from './coreProcess';
 import { readModelSettings, secretName } from './settings';
 
@@ -9,6 +9,8 @@ import { readModelSettings, secretName } from './settings';
 export interface TestApi {
   setApiKey(provider: ModelProvider, apiKey: string): Promise<void>;
   sendMessage(text: string): Promise<{ readonly text: string; readonly stopReason: StopReason }>;
+  /** Submits a message through the open chat panel, as if it had been typed there. */
+  submitInChatView(text: string): Promise<ChatOutcome>;
 }
 
 async function setApiKey(secrets: vscode.SecretStorage): Promise<void> {
@@ -49,6 +51,7 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
   });
   const session = new ChatSession(core, context.secrets);
   routes.chat = session;
+  const chatView = new ChatViewProvider(context.extensionUri, session);
 
   context.subscriptions.push(
     log,
@@ -57,10 +60,10 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
         core.dispose();
       },
     },
-    vscode.window.registerWebviewViewProvider(
-      ChatViewProvider.viewId,
-      new ChatViewProvider(context.extensionUri),
-    ),
+    // The panel keeps its conversation while the view is hidden.
+    vscode.window.registerWebviewViewProvider(ChatViewProvider.viewId, chatView, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
     vscode.commands.registerCommand('icode.setApiKey', () => setApiKey(context.secrets)),
     vscode.commands.registerCommand('icode.clearApiKey', () => clearApiKey(context.secrets)),
   );
@@ -79,5 +82,6 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
       });
       return { text: reply, stopReason };
     },
+    submitInChatView: (text) => chatView.submit(text),
   };
 }

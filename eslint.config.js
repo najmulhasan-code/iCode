@@ -19,4 +19,16 @@ export default defineConfig(
     files: ['**/*.js'],
     extends: [tseslint.configs.disableTypeChecked],
   },
+  {
+    // Scripts that run inside a webview, where these names are provided by the page.
+    files: ['packages/vscode/media/**/*.js'],
+    languageOptions: {
+      sourceType: 'script',
+      globals: {
+        acquireVsCodeApi: 'readonly',
+        document: 'readonly',
+        window: 'readonly',
+      },
+    },
+  },
 );
