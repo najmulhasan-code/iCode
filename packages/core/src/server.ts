@@ -30,7 +30,7 @@ import {
   isSupportedVersion,
   parseMessage,
 } from '@icode/protocol';
-import { type Model, ModelError } from './model.js';
+import { type Model, ModelConfigError, ModelError } from './model.js';
 
 export interface ServerOptions {
   /** Text from the client, in chunks of any size. */
@@ -45,8 +45,9 @@ export interface ServerOptions {
   readonly model?: Model;
   /**
    * Builds the model a client asks for with `model/set`. Without it the
-   * request is not offered. It may throw to refuse the parameters, and the
-   * message of that error is sent to the client.
+   * request is not offered. It throws a `ModelConfigError` to refuse the
+   * parameters with a reason the client may see. Any other failure is
+   * reported without its message, which could contain the parameters.
    */
   readonly createModel?: (params: SetModelParams) => Model;
   readonly info: PeerInfo;
@@ -170,7 +171,12 @@ export async function serve(options: ServerOptions): Promise<void> {
     try {
       model = createModel(request.params);
     } catch (error) {
-      void fail(request.id, ErrorCode.InvalidParams, describe(error));
+      if (error instanceof ModelConfigError) {
+        void fail(request.id, ErrorCode.InvalidParams, error.message);
+      } else {
+        log('building the model failed');
+        void fail(request.id, ErrorCode.InternalError, 'the model could not be set up');
+      }
       return;
     }
     void reply(request.id, {});

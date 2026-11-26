@@ -1,6 +1,6 @@
 import type { SetModelParams } from '@icode/protocol';
 import { createAnthropicModel } from './anthropic.js';
-import type { Model } from './model.js';
+import { type Model, ModelConfigError } from './model.js';
 import { createOpenAICompatibleModel } from './openai.js';
 import { serve } from './server.js';
 
@@ -30,7 +30,7 @@ function createModel(params: SetModelParams): Model {
     });
   }
   if (params.model === undefined) {
-    throw new Error('the openai-compatible provider needs a model name');
+    throw new ModelConfigError('the openai-compatible provider needs a model name');
   }
   return createOpenAICompatibleModel({ ...shared, model: params.model });
 }
@@ -40,6 +40,9 @@ function createModel(params: SetModelParams): Model {
  * input and output. Diagnostics go to standard error.
  */
 async function main(): Promise<void> {
+  // Standard output carries the protocol and nothing else. Anything a
+  // dependency prints through the console goes to standard error.
+  globalThis.console = new console.Console(process.stderr, process.stderr);
   process.stdin.setEncoding('utf8');
   // A closed reader is reported through the failed write. Without a listener
   // the same error would also crash the process as an unhandled event.

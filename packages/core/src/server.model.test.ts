@@ -10,7 +10,7 @@ import {
 } from '@icode/protocol';
 import { describe, expect, it } from 'vitest';
 import { createFixedModel } from './fixedModel.js';
-import type { Model } from './model.js';
+import { type Model, ModelConfigError } from './model.js';
 import { type ServerOptions, serve } from './server.js';
 
 const INITIALIZE = {
@@ -132,7 +132,7 @@ describe('model/set', () => {
 
   it('passes on the reason when the parameters do not fit the provider', async () => {
     const createModel = (): Model => {
-      throw new Error('this provider needs a model name');
+      throw new ModelConfigError('this provider needs a model name');
     };
     const run = await exchange({ createModel }, [
       INITIALIZE,
@@ -143,6 +143,29 @@ describe('model/set', () => {
       error: { code: ErrorCode.InvalidParams, message: 'this provider needs a model name' },
     });
   });
+
+  it.each([
+    ['an error', (params: unknown) => new Error(JSON.stringify(params))],
+    ['a string', (params: unknown) => JSON.stringify(params)],
+  ])(
+    'hides an unexpected failure thrown as %s, which may hold the key',
+    async (_name, toThrown) => {
+      const createModel = (params: unknown): Model => {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
+        throw toThrown(params);
+      };
+      const run = await exchange({ createModel }, [
+        INITIALIZE,
+        setModel(2, { provider: 'anthropic', apiKey: KEY }),
+      ]);
+
+      expect(run.response(2)).toMatchObject({
+        error: { code: ErrorCode.InternalError, message: 'the model could not be set up' },
+      });
+      expect(run.written).not.toContain(KEY);
+      expect(run.logged.join(' ')).not.toContain(KEY);
+    },
+  );
 
   it('is not offered when the core was started without a way to build models', async () => {
     const run = await exchange({ model: createFixedModel(['x']) }, [

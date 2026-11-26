@@ -32,7 +32,9 @@ interface Run {
  */
 function runCore(requests: readonly Request[]): Promise<Run> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [MAIN], { stdio: ['pipe', 'pipe', 'pipe'] });
+    // The SDKs print diagnostics when these are set. None of it may reach standard output.
+    const env = { ...process.env, OPENAI_LOG: 'debug', ANTHROPIC_LOG: 'debug' };
+    const child = spawn(process.execPath, [MAIN], { stdio: ['pipe', 'pipe', 'pipe'], env });
     let stdout = '';
     let stderr = '';
     let next = 0;
