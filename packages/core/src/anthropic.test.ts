@@ -2,7 +2,9 @@ import { type IncomingHttpHeaders, type ServerResponse, createServer } from 'nod
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DEFAULT_ANTHROPIC_MODEL, createAnthropicModel } from './anthropic.js';
+import { PROTOCOL_VERSION } from '@icode/protocol';
 import type { Model, ModelEvent } from './model.js';
+import { serve } from './server.js';
 
 interface SeenRequest {
   readonly method: string | undefined;
@@ -54,9 +56,9 @@ async function standIn(handler: Handler) {
   return { url: `http://127.0.0.1:${String(port)}`, requests };
 }
 
-function writeEvents(response: ServerResponse, events: readonly { type: string }[]): void {
+function writeEvents(response: ServerResponse, events: readonly Record<string, unknown>[]): void {
   for (const event of events) {
-    response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+    response.write(`event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`);
   }
 }
 
@@ -179,6 +181,38 @@ describe('a reply', () => {
     expect(api.requests[0]?.body).toMatchObject({ model: 'another-model', max_tokens: 1000 });
   });
 
+  it('names the model that took over after a fallback, including a second one', async () => {
+    const api = await standIn((response) => {
+      startStream(response);
+      const events: Record<string, unknown>[] = replyEvents(['answer'], 'end_turn', 'first-model');
+      const fallback = (from: string, to: string) => ({
+        type: 'content_block_start',
+        index: 0,
+        content_block: {
+          type: 'fallback',
+          from: { model: from },
+          to: { model: to },
+          trigger: { type: 'refusal', category: null },
+        },
+      });
+      events.splice(1, 0, fallback('first-model', 'second-model'), {
+        type: 'content_block_stop',
+        index: 0,
+      });
+      events.splice(3, 0, fallback('second-model', 'third-model'), {
+        type: 'content_block_stop',
+        index: 0,
+      });
+      writeEvents(response, events);
+      response.end();
+    });
+
+    expect((await collect(modelFor(api.url))).at(-1)).toMatchObject({
+      type: 'end',
+      model: 'third-model',
+    });
+  });
+
   it('leaves out content that is not text', async () => {
     const api = await standIn((response) => {
       startStream(response);
@@ -253,6 +287,8 @@ describe('a failed request', () => {
     [404, 'not_found_error', 'not_found'],
     [400, 'invalid_request_error', 'invalid_request'],
     [413, 'request_too_large', 'invalid_request'],
+    [408, 'request_timeout', 'connection'],
+    [409, 'conflict', 'overloaded'],
     [429, 'rate_limit_error', 'rate_limit'],
     [500, 'api_error', 'overloaded'],
     [529, 'overloaded_error', 'overloaded'],
@@ -298,7 +334,7 @@ describe('a failed request', () => {
       startStream(response);
       writeEvents(response, replyEvents(['partial'], 'end_turn').slice(0, 3));
       writeEvents(response, [
-        { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } } as never,
+        { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
       ]);
       response.end();
     });
@@ -307,6 +343,89 @@ describe('a failed request', () => {
       name: 'ModelError',
       kind: 'overloaded',
     });
+  });
+
+  it.each([
+    ['authentication_error', 'authentication'],
+    ['permission_error', 'permission'],
+    ['invalid_request_error', 'invalid_request'],
+    ['rate_limit_error', 'rate_limit'],
+    ['api_error', 'overloaded'],
+  ])('that fails inside an open stream with %s is reported as %s', async (type, kind) => {
+    const api = await standIn((response) => {
+      startStream(response);
+      writeEvents(response, replyEvents(['partial'], 'end_turn').slice(0, 3));
+      writeEvents(response, [{ type: 'error', error: { type, message: 'failed' } }]);
+      response.end();
+    });
+
+    await expect(collect(modelFor(api.url))).rejects.toMatchObject({ name: 'ModelError', kind });
+  });
+
+  it('never carries a credential that the provider echoed back', async () => {
+    // Built from pieces so that no credential-shaped text sits in this file.
+    const token = ['sk', 'ant', 'abc123456789'].join('-');
+    const echoed = `key test-key, token ${token}, header Bearer abcdefghijkl`;
+    const api = await standIn((response) => {
+      response.writeHead(401, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: echoed } }),
+      );
+    });
+
+    const failure = await collect(modelFor(api.url)).catch((error: unknown) => error);
+    const message = failure instanceof Error ? failure.message : '';
+    expect(message).toContain('[redacted]');
+    expect(message).not.toContain('test-key');
+    expect(message).not.toContain('abc123456789');
+    expect(message).not.toContain('abcdefghijkl');
+  });
+
+  it('is logged by the core without the echoed credential', async () => {
+    const api = await standIn((response) => {
+      response.writeHead(401, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          type: 'error',
+          error: { type: 'authentication_error', message: 'invalid key test-key' },
+        }),
+      );
+    });
+    const logged: string[] = [];
+    let written = '';
+    let answered: (() => void) | undefined;
+    const done = new Promise<void>((resolve) => {
+      answered = resolve;
+    });
+    async function* input(): AsyncGenerator<string> {
+      const initialize = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion: PROTOCOL_VERSION, client: { name: 'test', version: '0' } },
+      };
+      const chat = { jsonrpc: '2.0', id: 2, method: 'chat/send', params: { text: 'hi' } };
+      yield JSON.stringify(initialize) + String.fromCharCode(10);
+      yield JSON.stringify(chat) + String.fromCharCode(10);
+      await done;
+    }
+    await serve({
+      input: input(),
+      write: (text) => {
+        written += text;
+        if (written.includes('"id":2')) {
+          answered?.();
+        }
+      },
+      model: modelFor(api.url),
+      info: { name: 'test-core', version: '0' },
+      log: (text) => logged.push(text),
+    });
+
+    expect(written).toContain('"kind":"authentication"');
+    expect(logged.join(' ')).toContain('authentication');
+    expect(logged.join(' ')).not.toContain('test-key');
+    expect(written).not.toContain('test-key');
   });
 
   it('with no server to reach is reported as a connection problem', async () => {

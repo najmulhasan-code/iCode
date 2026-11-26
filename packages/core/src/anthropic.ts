@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import {
   type Model,
   ModelError,
+  type ModelErrorKind,
   type ModelEvent,
   type ModelRequest,
   type ModelStopReason,
@@ -64,6 +65,12 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
           if (event.type === 'message_start') {
             servedBy = event.message.model;
             inputTokens = event.message.usage.input_tokens;
+          } else if (event.type === 'content_block_start') {
+            // The API switched to another model after a decline. From here on
+            // that model writes the reply. There can be several switches.
+            if (event.content_block.type === 'fallback') {
+              servedBy = event.content_block.to.model;
+            }
           } else if (event.type === 'content_block_delta') {
             if (event.delta.type === 'text_delta') {
               yield { type: 'text', text: event.delta.text };
@@ -78,7 +85,7 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
         if (request.signal.aborted) {
           return;
         }
-        throw toModelError(error);
+        throw toModelError(error, options.apiKey);
       }
       yield {
         type: 'end',
@@ -113,47 +120,78 @@ function toStopReason(reason: Anthropic.Beta.BetaStopReason | null): ModelStopRe
   }
 }
 
-/** Sorts an SDK error into a kind, most specific class first. */
-function toModelError(error: unknown): ModelError {
+/** Error types the API names in a response body or in an error event of a stream. */
+const KIND_BY_ERROR_TYPE: Readonly<Record<string, ModelErrorKind>> = {
+  authentication_error: 'authentication',
+  permission_error: 'permission',
+  billing_error: 'permission',
+  not_found_error: 'not_found',
+  invalid_request_error: 'invalid_request',
+  request_too_large: 'invalid_request',
+  rate_limit_error: 'rate_limit',
+  overloaded_error: 'overloaded',
+  api_error: 'overloaded',
+  timeout_error: 'connection',
+};
+
+function kindForStatus(status: number): ModelErrorKind {
+  if (status === 401) {
+    return 'authentication';
+  }
+  if (status === 402 || status === 403) {
+    return 'permission';
+  }
+  if (status === 404) {
+    return 'not_found';
+  }
+  if (status === 408) {
+    return 'connection';
+  }
+  if (status === 429) {
+    return 'rate_limit';
+  }
+  // A conflict is transient on this API, like a server-side failure.
+  if (status === 409 || status >= 500) {
+    return 'overloaded';
+  }
+  if (status >= 400) {
+    return 'invalid_request';
+  }
+  return 'unexpected';
+}
+
+/**
+ * Removes credentials from text that came from outside. A provider may echo
+ * part of a request in an error message, and that text is written to the log.
+ */
+function redact(text: string, apiKey: string): string {
+  const withoutKey = apiKey === '' ? text : text.split(apiKey).join('[redacted]');
+  return withoutKey
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, '[redacted]')
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer [redacted]');
+}
+
+/**
+ * Turns a failure into a ModelError. The kind comes from the error type the
+ * API named when there is one, because an error inside an open stream has no
+ * HTTP status, and from the status otherwise.
+ */
+function toModelError(error: unknown, apiKey: string): ModelError {
   if (error instanceof ModelError) {
     return error;
   }
+  const message = redact(error instanceof Error ? error.message : String(error), apiKey);
   // The connection classes extend APIError, so they are checked before it.
   if (error instanceof Anthropic.APIConnectionError) {
-    return new ModelError('connection', error.message);
-  }
-  if (error instanceof Anthropic.AuthenticationError) {
-    return new ModelError('authentication', error.message, error.status);
-  }
-  if (
-    error instanceof Anthropic.PermissionDeniedError ||
-    error instanceof Anthropic.PaymentRequiredError
-  ) {
-    return new ModelError('permission', error.message, error.status);
-  }
-  if (error instanceof Anthropic.NotFoundError) {
-    return new ModelError('not_found', error.message, error.status);
-  }
-  if (error instanceof Anthropic.RateLimitError) {
-    return new ModelError('rate_limit', error.message, error.status);
-  }
-  if (error instanceof Anthropic.InternalServerError) {
-    return new ModelError('overloaded', error.message, error.status);
+    return new ModelError('connection', message);
   }
   if (error instanceof Anthropic.APIError) {
     const rawStatus: unknown = error.status;
     const status = typeof rawStatus === 'number' ? rawStatus : undefined;
-    // An error event inside an open stream has no HTTP status of its own.
-    if (error.type === 'overloaded_error' || error.type === 'api_error') {
-      return new ModelError('overloaded', error.message, status);
-    }
-    if (error.type === 'rate_limit_error') {
-      return new ModelError('rate_limit', error.message, status);
-    }
-    if (status !== undefined && status >= 400 && status < 500) {
-      return new ModelError('invalid_request', error.message, status);
-    }
-    return new ModelError('unexpected', error.message, status);
+    const rawType: unknown = error.type;
+    const named = typeof rawType === 'string' ? KIND_BY_ERROR_TYPE[rawType] : undefined;
+    const kind = named ?? (status === undefined ? 'unexpected' : kindForStatus(status));
+    return new ModelError(kind, message, status);
   }
-  return new ModelError('unexpected', error instanceof Error ? error.message : String(error));
+  return new ModelError('unexpected', message);
 }
