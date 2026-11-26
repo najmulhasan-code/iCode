@@ -7,6 +7,7 @@ import {
   type ModelRequest,
   type ModelStopReason,
 } from './model.js';
+import { kindForStatus, redact } from './modelErrors.js';
 
 export interface AnthropicModelOptions {
   readonly apiKey: string;
@@ -87,6 +88,10 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
         }
         throw toModelError(error, options.apiKey);
       }
+      // A cancelled stream can also end without an error.
+      if (request.signal.aborted) {
+        return;
+      }
       yield {
         type: 'end',
         reason: toStopReason(stopReason),
@@ -111,65 +116,28 @@ function toStopReason(reason: Anthropic.Beta.BetaStopReason | null): ModelStopRe
     case 'pause_turn':
     case 'compaction':
     case null:
+    default:
       // No tools or context management are requested, so these cannot be a
-      // normal end of a reply.
-      throw new ModelError(
-        'unexpected',
-        `the reply ended with the unexpected stop reason ${String(reason)}`,
-      );
+      // normal end of a reply. A value this code does not know is treated the
+      // same way.
+      // The reason is the server's text and is left out of the message.
+      throw new ModelError('unexpected', 'the reply ended with an unexpected stop reason');
   }
 }
 
 /** Error types the API names in a response body or in an error event of a stream. */
-const KIND_BY_ERROR_TYPE: Readonly<Record<string, ModelErrorKind>> = {
-  authentication_error: 'authentication',
-  permission_error: 'permission',
-  billing_error: 'permission',
-  not_found_error: 'not_found',
-  invalid_request_error: 'invalid_request',
-  request_too_large: 'invalid_request',
-  rate_limit_error: 'rate_limit',
-  overloaded_error: 'overloaded',
-  api_error: 'overloaded',
-  timeout_error: 'connection',
-};
-
-function kindForStatus(status: number): ModelErrorKind {
-  if (status === 401) {
-    return 'authentication';
-  }
-  if (status === 402 || status === 403) {
-    return 'permission';
-  }
-  if (status === 404) {
-    return 'not_found';
-  }
-  if (status === 408) {
-    return 'connection';
-  }
-  if (status === 429) {
-    return 'rate_limit';
-  }
-  // A conflict is transient on this API, like a server-side failure.
-  if (status === 409 || status >= 500) {
-    return 'overloaded';
-  }
-  if (status >= 400) {
-    return 'invalid_request';
-  }
-  return 'unexpected';
-}
-
-/**
- * Removes credentials from text that came from outside. A provider may echo
- * part of a request in an error message, and that text is written to the log.
- */
-function redact(text: string, apiKey: string): string {
-  const withoutKey = apiKey === '' ? text : text.split(apiKey).join('[redacted]');
-  return withoutKey
-    .replace(/sk-[A-Za-z0-9_-]{8,}/g, '[redacted]')
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer [redacted]');
-}
+const KIND_BY_ERROR_TYPE: ReadonlyMap<string, ModelErrorKind> = new Map([
+  ['authentication_error', 'authentication'],
+  ['permission_error', 'permission'],
+  ['billing_error', 'permission'],
+  ['not_found_error', 'not_found'],
+  ['invalid_request_error', 'invalid_request'],
+  ['request_too_large', 'invalid_request'],
+  ['rate_limit_error', 'rate_limit'],
+  ['overloaded_error', 'overloaded'],
+  ['api_error', 'overloaded'],
+  ['timeout_error', 'connection'],
+]);
 
 /**
  * Turns a failure into a ModelError. The kind comes from the error type the
@@ -189,7 +157,7 @@ function toModelError(error: unknown, apiKey: string): ModelError {
     const rawStatus: unknown = error.status;
     const status = typeof rawStatus === 'number' ? rawStatus : undefined;
     const rawType: unknown = error.type;
-    const named = typeof rawType === 'string' ? KIND_BY_ERROR_TYPE[rawType] : undefined;
+    const named = typeof rawType === 'string' ? KIND_BY_ERROR_TYPE.get(rawType) : undefined;
     const kind = named ?? (status === undefined ? 'unexpected' : kindForStatus(status));
     return new ModelError(kind, message, status);
   }
