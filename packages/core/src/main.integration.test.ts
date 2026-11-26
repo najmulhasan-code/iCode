@@ -1,9 +1,23 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { type Message, PROTOCOL_VERSION, isNotification, parseMessage } from '@icode/protocol';
+import {
+  CoreErrorCode,
+  type Message,
+  PROTOCOL_VERSION,
+  isNotification,
+  isResponse,
+  parseMessage,
+} from '@icode/protocol';
 import { describe, expect, it } from 'vitest';
+import { standIn } from './testing/standIn.js';
 
 const MAIN = fileURLToPath(new URL('../dist/main.js', import.meta.url));
+
+/** A request as the test writes it. Only the id is needed to wait for its answer. */
+interface Request {
+  readonly id: number;
+  readonly [field: string]: unknown;
+}
 
 interface Run {
   readonly messages: Message[];
@@ -12,20 +26,33 @@ interface Run {
 }
 
 /**
- * Starts the built core as a separate process, sends the lines, and collects
- * its output. The connection is closed once the core has answered the request
- * with the given id, as a client would do.
+ * Starts the built core as a separate process and sends the requests one
+ * after another, each once the one before has been answered. The connection
+ * is closed after the last answer, as a client would do.
  */
-function runCore(lines: readonly unknown[], lastId: number): Promise<Run> {
+function runCore(requests: readonly Request[]): Promise<Run> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [MAIN], { stdio: ['pipe', 'pipe', 'pipe'] });
-    const answer = `{"jsonrpc":"2.0","id":${String(lastId)},`;
+    // The SDKs print diagnostics when these are set. None of it may reach standard output.
+    const env = { ...process.env, OPENAI_LOG: 'debug', ANTHROPIC_LOG: 'debug' };
+    const child = spawn(process.execPath, [MAIN], { stdio: ['pipe', 'pipe', 'pipe'], env });
     let stdout = '';
     let stderr = '';
+    let next = 0;
+    const sendNext = (): void => {
+      const request = requests[next];
+      if (request === undefined) {
+        child.stdin.end();
+      } else {
+        child.stdin.write(`${JSON.stringify(request)}\n`);
+      }
+    };
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
       stdout += chunk;
-      if (stdout.split('\n').some((line) => line.startsWith(answer))) {
-        child.stdin.end();
+      const current = requests[next];
+      const answer = `{"jsonrpc":"2.0","id":${String(current?.id)},`;
+      if (current !== undefined && stdout.split('\n').some((line) => line.startsWith(answer))) {
+        next += 1;
+        sendNext();
       }
     });
     child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
@@ -44,24 +71,58 @@ function runCore(lines: readonly unknown[], lastId: number): Promise<Run> {
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
-    for (const line of lines) {
-      child.stdin.write(`${JSON.stringify(line)}\n`);
-    }
+    sendNext();
   });
 }
 
+const INITIALIZE = {
+  jsonrpc: '2.0',
+  id: 1,
+  method: 'initialize',
+  params: { protocolVersion: PROTOCOL_VERSION, client: { name: 'test', version: '0' } },
+};
+const chat = (id: number) => ({
+  jsonrpc: '2.0',
+  id,
+  method: 'chat/send',
+  params: { text: 'hello' },
+});
+
 describe('the core process', () => {
-  it('completes the handshake and a chat request over standard input and output', async () => {
-    const requests = [
+  it('reaches a model server chosen with model/set and streams its reply', async () => {
+    const chunk = (delta: object, finish: string | null) => ({
+      id: 'c',
+      object: 'chat.completion.chunk',
+      created: 0,
+      model: 'stand-in-model',
+      choices: [{ index: 0, delta, finish_reason: finish }],
+    });
+    const api = await standIn((response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      for (const part of [
+        chunk({ content: 'Hello' }, null),
+        chunk({ content: ' world' }, null),
+        chunk({}, 'stop'),
+      ]) {
+        response.write(`data: ${JSON.stringify(part)}\n\n`);
+      }
+      response.end('data: [DONE]\n\n');
+    });
+    const run = await runCore([
+      INITIALIZE,
       {
         jsonrpc: '2.0',
-        id: 1,
-        method: 'initialize',
-        params: { protocolVersion: PROTOCOL_VERSION, client: { name: 'test', version: '0' } },
+        id: 2,
+        method: 'model/set',
+        params: {
+          provider: 'openai-compatible',
+          apiKey: 'test-key',
+          model: 'some-model',
+          baseUrl: api.url,
+        },
       },
-      { jsonrpc: '2.0', id: 2, method: 'chat/send', params: { text: 'hello' } },
-    ];
-    const run = await runCore(requests, 2);
+      chat(3),
+    ]);
 
     expect(run.exitCode).toBe(0);
     expect(run.stderr).toBe('');
@@ -70,7 +131,30 @@ describe('the core process', () => {
       .filter(isNotification)
       .map((message) => (message.params as { text: string }).text)
       .join('');
-    expect(reply).toBe('The core is running. No model provider is connected yet.');
-    expect(run.messages.at(-1)).toEqual({ jsonrpc: '2.0', id: 2, result: { stopReason: 'end' } });
+    expect(reply).toBe('Hello world');
+    expect(run.messages.at(-1)).toEqual({ jsonrpc: '2.0', id: 3, result: { stopReason: 'end' } });
+    expect(api.requests[0]?.headers.authorization).toBe('Bearer test-key');
+    expect(api.requests[0]?.body).toMatchObject({ model: 'some-model' });
+  });
+
+  it('refuses a chat request before a model is chosen, and a provider without its model name', async () => {
+    const run = await runCore([
+      INITIALIZE,
+      chat(2),
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'model/set',
+        params: { provider: 'openai-compatible', apiKey: 'test-key' },
+      },
+    ]);
+    const response = (id: number) =>
+      run.messages.find((message) => isResponse(message) && message.id === id);
+
+    expect(run.exitCode).toBe(0);
+    expect(response(2)).toMatchObject({ error: { code: CoreErrorCode.ModelNotSet } });
+    expect(response(3)).toMatchObject({
+      error: { message: 'the openai-compatible provider needs a model name' },
+    });
   });
 });

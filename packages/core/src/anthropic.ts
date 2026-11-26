@@ -36,6 +36,8 @@ const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 export function createAnthropicModel(options: AnthropicModelOptions): Model {
   const client = new Anthropic({
     apiKey: options.apiKey,
+    // The SDK's own logging would go to standard output, which carries the protocol.
+    logLevel: 'off',
     ...(options.baseURL === undefined ? {} : { baseURL: options.baseURL }),
     ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
   });

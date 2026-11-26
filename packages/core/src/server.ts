@@ -17,6 +17,8 @@ import {
   ProtocolError,
   type RequestId,
   type RequestMessage,
+  SET_MODEL_METHOD,
+  type SetModelParams,
   type StopReason,
   encodeMessage,
   isCancelParams,
@@ -24,10 +26,11 @@ import {
   isInitializeParams,
   isNotification,
   isRequest,
+  isSetModelParams,
   isSupportedVersion,
   parseMessage,
 } from '@icode/protocol';
-import { type Model, ModelError } from './model.js';
+import { type Model, ModelConfigError, ModelError } from './model.js';
 
 export interface ServerOptions {
   /** Text from the client, in chunks of any size. */
@@ -38,7 +41,15 @@ export interface ServerOptions {
    * the core down and output does not pile up in memory.
    */
   readonly write: (text: string) => void | Promise<void>;
-  readonly model: Model;
+  /** The model to use until the client chooses one. */
+  readonly model?: Model;
+  /**
+   * Builds the model a client asks for with `model/set`. Without it the
+   * request is not offered. It throws a `ModelConfigError` to refuse the
+   * parameters with a reason the client may see. Any other failure is
+   * reported without its message, which could contain the parameters.
+   */
+  readonly createModel?: (params: SetModelParams) => Model;
   readonly info: PeerInfo;
   /** Receives diagnostics. They never go to the client's stream. */
   readonly log?: (text: string) => void;
@@ -76,7 +87,8 @@ function describe(error: unknown): string {
  * nothing is written after a failed write.
  */
 export async function serve(options: ServerOptions): Promise<void> {
-  const { input, write, model, info } = options;
+  const { input, write, info, createModel } = options;
+  let model = options.model;
   const log = options.log ?? (() => undefined);
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 5000;
   const decoder = new LineDecoder();
@@ -146,8 +158,32 @@ export async function serve(options: ServerOptions): Promise<void> {
     void reply(request.id, result);
   };
 
+  const setModel = (request: RequestMessage): void => {
+    if (createModel === undefined) {
+      void fail(request.id, ErrorCode.MethodNotFound, `unknown method ${request.method}`);
+      return;
+    }
+    // The parameters hold a credential, so they are never logged or echoed.
+    if (!isSetModelParams(request.params)) {
+      void fail(request.id, ErrorCode.InvalidParams, 'model/set needs a known provider and a key');
+      return;
+    }
+    try {
+      model = createModel(request.params);
+    } catch (error) {
+      if (error instanceof ModelConfigError) {
+        void fail(request.id, ErrorCode.InvalidParams, error.message);
+      } else {
+        log('building the model failed');
+        void fail(request.id, ErrorCode.InternalError, 'the model could not be set up');
+      }
+      return;
+    }
+    void reply(request.id, {});
+  };
+
   /** Runs one chat request to its single answer. It never rejects. */
-  const chat = async (request: RequestMessage, text: string): Promise<void> => {
+  const chat = async (request: RequestMessage, text: string, model: Model): Promise<void> => {
     const controller = new AbortController();
     running.set(request.id, controller);
     const cancelled = whenAborted(controller.signal);
@@ -224,6 +260,10 @@ export async function serve(options: ServerOptions): Promise<void> {
       void fail(request.id, CoreErrorCode.NotInitialized, 'the first request must be initialize');
       return;
     }
+    if (request.method === SET_MODEL_METHOD) {
+      setModel(request);
+      return;
+    }
     if (request.method !== CHAT_SEND_METHOD) {
       void fail(request.id, ErrorCode.MethodNotFound, `unknown method ${request.method}`);
       return;
@@ -240,7 +280,12 @@ export async function serve(options: ServerOptions): Promise<void> {
       );
       return;
     }
-    const task = chat(request, request.params.text)
+    if (model === undefined) {
+      void fail(request.id, CoreErrorCode.ModelNotSet, 'no model has been chosen yet');
+      return;
+    }
+    // A request keeps the model it started with, even if another is chosen meanwhile.
+    const task = chat(request, request.params.text, model)
       .catch((error: unknown) => {
         closeConnection(error);
       })

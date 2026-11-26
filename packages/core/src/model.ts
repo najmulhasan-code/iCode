@@ -56,6 +56,17 @@ export type ModelErrorKind =
   | 'connection'
   | 'unexpected';
 
+/**
+ * Thrown while building a model when the settings do not fit the provider.
+ * Its message is written by this code base and is safe to show to a client.
+ */
+export class ModelConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ModelConfigError';
+  }
+}
+
 /** Thrown by a model adapter when a request fails. */
 export class ModelError extends Error {
   readonly kind: ModelErrorKind;

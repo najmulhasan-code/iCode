@@ -61,6 +61,8 @@ export const CoreErrorCode = {
   RequestInProgress: -32003,
   /** The model provider could not be reached or refused the request. */
   ModelRequestFailed: -32004,
+  /** A chat request arrived before any model was chosen. */
+  ModelNotSet: -32005,
 } as const;
 
 /** Carried in the `data` of a `ModelRequestFailed` error. */
