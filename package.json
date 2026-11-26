@@ -23,7 +23,7 @@
     "lint": "eslint eslint.config.js vitest.config.js packages e2e",
     "format": "prettier --write \"*.{js,json}\" \"{README,CONTRIBUTING}.md\" .github packages \"e2e/*.json\" e2e/src",
     "format:check": "prettier --check \"*.{js,json}\" \"{README,CONTRIBUTING}.md\" .github packages \"e2e/*.json\" e2e/src",
-    "test": "vitest run",
+    "test": "tsc --build && vitest run",
     "test:e2e": "npm run build && npm run test --workspace @icode/e2e",
     "check": "npm run typecheck && npm run lint && npm run format:check && npm run test"
   },

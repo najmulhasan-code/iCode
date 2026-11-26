@@ -1,0 +1,15 @@
+{
+  "name": "@icode/core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The iCode agent engine, a process that clients talk to over standard input and output",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/main.js",
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@icode/protocol": "0.0.0"
+  }
+}
