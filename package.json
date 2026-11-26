@@ -21,8 +21,8 @@
     "build": "tsc --build",
     "typecheck": "tsc --build",
     "lint": "eslint eslint.config.js packages e2e",
-    "format": "prettier --write \"*.{js,json}\" \"{README,CONTRIBUTING}.md\" .github packages e2e",
-    "format:check": "prettier --check \"*.{js,json}\" \"{README,CONTRIBUTING}.md\" .github packages e2e",
+    "format": "prettier --write \"*.{js,json}\" \"{README,CONTRIBUTING}.md\" .github packages \"e2e/*.json\" e2e/src",
+    "format:check": "prettier --check \"*.{js,json}\" \"{README,CONTRIBUTING}.md\" .github packages \"e2e/*.json\" e2e/src",
     "check": "npm run typecheck && npm run lint && npm run format:check",
     "test:e2e": "npm run build && npm run test --workspace @icode/e2e"
   },
