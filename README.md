@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="packages/vscode/media/icode.svg" width="96" height="96" alt="iCode logo">
+</p>
+
 # iCode
 
 iCode is an open-source coding agent for Visual Studio Code. It reads your
