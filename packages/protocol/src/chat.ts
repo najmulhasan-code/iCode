@@ -15,9 +15,10 @@ export interface ChatSendParams {
 
 /**
  * Why a reply ended: the model finished, the model reached its output limit,
- * or the request was cancelled.
+ * the provider's safety system declined the request, or the request was
+ * cancelled.
  */
-export type StopReason = 'end' | 'max_tokens' | 'cancelled';
+export type StopReason = 'end' | 'max_tokens' | 'refusal' | 'cancelled';
 
 export interface ChatSendResult {
   readonly stopReason: StopReason;
@@ -58,4 +59,12 @@ export const CoreErrorCode = {
   UnsupportedVersion: -32001,
   AlreadyInitialized: -32002,
   RequestInProgress: -32003,
+  /** The model provider could not be reached or refused the request. */
+  ModelRequestFailed: -32004,
 } as const;
+
+/** Carried in the `data` of a `ModelRequestFailed` error. */
+export interface ModelRequestFailedData {
+  /** The kind of failure, for example `authentication` or `rate_limit`. */
+  readonly kind: string;
+}
