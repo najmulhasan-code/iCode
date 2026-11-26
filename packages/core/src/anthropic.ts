@@ -116,28 +116,28 @@ function toStopReason(reason: Anthropic.Beta.BetaStopReason | null): ModelStopRe
     case 'pause_turn':
     case 'compaction':
     case null:
+    default:
       // No tools or context management are requested, so these cannot be a
-      // normal end of a reply.
-      throw new ModelError(
-        'unexpected',
-        `the reply ended with the unexpected stop reason ${String(reason)}`,
-      );
+      // normal end of a reply. A value this code does not know is treated the
+      // same way.
+      // The reason is the server's text and is left out of the message.
+      throw new ModelError('unexpected', 'the reply ended with an unexpected stop reason');
   }
 }
 
 /** Error types the API names in a response body or in an error event of a stream. */
-const KIND_BY_ERROR_TYPE: Readonly<Record<string, ModelErrorKind>> = {
-  authentication_error: 'authentication',
-  permission_error: 'permission',
-  billing_error: 'permission',
-  not_found_error: 'not_found',
-  invalid_request_error: 'invalid_request',
-  request_too_large: 'invalid_request',
-  rate_limit_error: 'rate_limit',
-  overloaded_error: 'overloaded',
-  api_error: 'overloaded',
-  timeout_error: 'connection',
-};
+const KIND_BY_ERROR_TYPE: ReadonlyMap<string, ModelErrorKind> = new Map([
+  ['authentication_error', 'authentication'],
+  ['permission_error', 'permission'],
+  ['billing_error', 'permission'],
+  ['not_found_error', 'not_found'],
+  ['invalid_request_error', 'invalid_request'],
+  ['request_too_large', 'invalid_request'],
+  ['rate_limit_error', 'rate_limit'],
+  ['overloaded_error', 'overloaded'],
+  ['api_error', 'overloaded'],
+  ['timeout_error', 'connection'],
+]);
 
 /**
  * Turns a failure into a ModelError. The kind comes from the error type the
@@ -157,7 +157,7 @@ function toModelError(error: unknown, apiKey: string): ModelError {
     const rawStatus: unknown = error.status;
     const status = typeof rawStatus === 'number' ? rawStatus : undefined;
     const rawType: unknown = error.type;
-    const named = typeof rawType === 'string' ? KIND_BY_ERROR_TYPE[rawType] : undefined;
+    const named = typeof rawType === 'string' ? KIND_BY_ERROR_TYPE.get(rawType) : undefined;
     const kind = named ?? (status === undefined ? 'unexpected' : kindForStatus(status));
     return new ModelError(kind, message, status);
   }

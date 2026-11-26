@@ -363,6 +363,30 @@ describe('a failed request', () => {
     await expect(collect(modelFor(api.url))).rejects.toMatchObject({ name: 'ModelError', kind });
   });
 
+  it.each(['constructor', 'toString', '__proto__', 'no_such_type'])(
+    'does not mistake the error type %s for a known one',
+    async (type) => {
+      const api = await standIn((response) => {
+        sendError(response, 500, type);
+      });
+
+      await expect(collect(modelFor(api.url))).rejects.toMatchObject({
+        name: 'ModelError',
+        kind: 'overloaded',
+      });
+    },
+  );
+
+  it('keeps an unknown stop reason, which is server text, out of the error', async () => {
+    const api = await standIn((response) => {
+      sendReply(response, ['x'], 'leaked test-key');
+    });
+
+    const failure = await collect(modelFor(api.url)).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ name: 'ModelError', kind: 'unexpected' });
+    expect(failure instanceof Error ? failure.message : 'test-key').not.toContain('test-key');
+  });
+
   it('never carries a credential that the provider echoed back', async () => {
     // Built from pieces so that no credential-shaped text sits in this file.
     const token = ['sk', 'ant', 'abc123456789'].join('-');

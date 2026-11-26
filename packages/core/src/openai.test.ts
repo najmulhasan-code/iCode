@@ -194,6 +194,75 @@ describe('OpenAI-compatible adapter', () => {
     });
   });
 
+  it('shows a refusal written to its own field and reports the reply as refused', async () => {
+    const api = await standIn((response) => {
+      startStream(response);
+      writeChunks(response, [
+        { ...base, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] },
+        { ...base, choices: [{ index: 0, delta: { refusal: 'I cannot ' }, finish_reason: null }] },
+        {
+          ...base,
+          choices: [{ index: 0, delta: { refusal: 'help with that.' }, finish_reason: null }],
+        },
+        finishChunk('stop'),
+      ]);
+      finishStream(response);
+    });
+
+    expect(await collect(modelFor(api.url))).toEqual([
+      { type: 'text', text: 'I cannot ' },
+      { type: 'text', text: 'help with that.' },
+      { type: 'end', reason: 'refusal', model: 'stand-in-model' },
+    ]);
+  });
+
+  it('keeps an unexpected finish reason, which is server text, out of the error', async () => {
+    const api = await standIn((response) => {
+      sendReply(response, ['x'], 'leaked test-key');
+    });
+
+    const failure = await collect(modelFor(api.url)).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ name: 'ModelError', kind: 'unexpected' });
+    expect(failure instanceof Error ? failure.message : 'test-key').not.toContain('test-key');
+  });
+
+  it('leaves out the usage option when it is switched off', async () => {
+    const api = await standIn((response, request) => {
+      if ('stream_options' in request.body) {
+        sendError(response, 400, { type: 'invalid_request_error' });
+      } else {
+        startStream(response);
+        writeChunks(response, [textChunk('ok'), finishChunk('stop')]);
+        finishStream(response);
+      }
+    });
+    const strict = createOpenAICompatibleModel({
+      apiKey: 'test-key',
+      model: 'some-model',
+      baseURL: api.url,
+      maxRetries: 0,
+      reportUsage: false,
+    });
+
+    expect((await collect(strict)).at(-1)).toMatchObject({ type: 'end', reason: 'end' });
+    expect(api.requests[0]?.body).not.toHaveProperty('stream_options');
+    await expect(collect(modelFor(api.url))).rejects.toMatchObject({ kind: 'invalid_request' });
+  });
+
+  it.each(['constructor', 'toString', '__proto__', 'no_such_code'])(
+    'does not mistake the error code %s for a known one',
+    async (code) => {
+      const api = await standIn((response) => {
+        sendError(response, 500, { type: code, code });
+      });
+
+      await expect(collect(modelFor(api.url))).rejects.toMatchObject({
+        name: 'ModelError',
+        kind: 'overloaded',
+      });
+    },
+  );
+
   it('reports an error sent inside an open stream', async () => {
     const api = await standIn((response) => {
       startStream(response);

@@ -18,6 +18,11 @@ export interface OpenAICompatibleModelOptions {
   readonly baseURL?: string;
   /** How often a failed request is retried. The SDK's default is two. */
   readonly maxRetries?: number;
+  /**
+   * Whether to ask the server for token counts in the stream. On by default.
+   * Turn it off for a server that rejects the `stream_options` field.
+   */
+  readonly reportUsage?: boolean;
 }
 
 /**
@@ -36,6 +41,7 @@ export function createOpenAICompatibleModel(options: OpenAICompatibleModelOption
       let servedBy: string | undefined;
       let usage: ModelUsage | undefined;
       let finishReason: string | undefined;
+      let refused = false;
       try {
         const chunks = await client.chat.completions.create(
           {
@@ -46,7 +52,7 @@ export function createOpenAICompatibleModel(options: OpenAICompatibleModelOption
             })),
             stream: true,
             // Without this the token counts are left out of a streamed reply.
-            stream_options: { include_usage: true },
+            ...(options.reportUsage === false ? {} : { stream_options: { include_usage: true } }),
           },
           { signal: request.signal },
         );
@@ -70,6 +76,12 @@ export function createOpenAICompatibleModel(options: OpenAICompatibleModelOption
           if (typeof text === 'string' && text !== '') {
             yield { type: 'text', text };
           }
+          // A refusal is written to its own field. It is shown like any other text.
+          const refusal = choice.delta?.refusal;
+          if (typeof refusal === 'string' && refusal !== '') {
+            refused = true;
+            yield { type: 'text', text: refusal };
+          }
           if (typeof choice.finish_reason === 'string') {
             finishReason = choice.finish_reason;
           }
@@ -86,7 +98,7 @@ export function createOpenAICompatibleModel(options: OpenAICompatibleModelOption
       }
       yield {
         type: 'end',
-        reason: toStopReason(finishReason),
+        reason: refused ? 'refusal' : toStopReason(finishReason),
         ...(usage === undefined ? {} : { usage }),
         ...(servedBy === undefined ? {} : { model: servedBy }),
       };
@@ -100,7 +112,7 @@ interface LooseChunk {
   readonly usage?: { readonly prompt_tokens?: number; readonly completion_tokens?: number } | null;
   readonly choices?: readonly (
     | {
-        readonly delta?: { readonly content?: unknown } | null;
+        readonly delta?: { readonly content?: unknown; readonly refusal?: unknown } | null;
         readonly finish_reason?: unknown;
       }
     | undefined
@@ -120,22 +132,20 @@ function toStopReason(reason: string | undefined): ModelStopReason {
       throw new ModelError('unexpected', 'the reply ended without a finish reason');
     default:
       // No tools are offered, so a tool call cannot be a normal end of a reply.
-      throw new ModelError(
-        'unexpected',
-        `the reply ended with the unexpected finish reason ${reason}`,
-      );
+      // The reason is the server's text and is left out of the message.
+      throw new ModelError('unexpected', 'the reply ended with an unexpected finish reason');
   }
 }
 
 /** Error codes that say more than the HTTP status they arrive with. */
-const KIND_BY_ERROR_CODE: Readonly<Record<string, ModelErrorKind>> = {
+const KIND_BY_ERROR_CODE: ReadonlyMap<string, ModelErrorKind> = new Map([
   // Sent with status 429, and waiting does not help: the account has no credit.
-  insufficient_quota: 'permission',
-  invalid_api_key: 'authentication',
-  model_not_found: 'not_found',
-  rate_limit_exceeded: 'rate_limit',
-  server_error: 'overloaded',
-};
+  ['insufficient_quota', 'permission'],
+  ['invalid_api_key', 'authentication'],
+  ['model_not_found', 'not_found'],
+  ['rate_limit_exceeded', 'rate_limit'],
+  ['server_error', 'overloaded'],
+]);
 
 function toModelError(error: unknown, apiKey: string): ModelError {
   if (error instanceof ModelError) {
@@ -150,7 +160,7 @@ function toModelError(error: unknown, apiKey: string): ModelError {
     const rawStatus: unknown = error.status;
     const status = typeof rawStatus === 'number' ? rawStatus : undefined;
     const named =
-      KIND_BY_ERROR_CODE[error.code ?? ''] ?? KIND_BY_ERROR_CODE[error.type ?? ''] ?? undefined;
+      KIND_BY_ERROR_CODE.get(error.code ?? '') ?? KIND_BY_ERROR_CODE.get(error.type ?? '');
     const kind = named ?? (status === undefined ? 'unexpected' : kindForStatus(status));
     return new ModelError(kind, message, status);
   }
