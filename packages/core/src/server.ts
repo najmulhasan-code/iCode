@@ -220,11 +220,11 @@ export async function serve(options: ServerOptions): Promise<void> {
     const controller = new AbortController();
     running.set(request.id, controller);
     const cancelled = whenAborted(controller.signal);
-    const messages = conversation.begin(text);
+    const turn = conversation.begin(text);
     let written = '';
     let stopReason: StopReason | undefined;
     try {
-      const stream = model.stream({ messages, signal: controller.signal });
+      const stream = model.stream({ messages: turn.messages, signal: controller.signal });
       const events = stream[Symbol.asyncIterator]();
       try {
         while (stopReason === undefined) {
@@ -257,10 +257,10 @@ export async function serve(options: ServerOptions): Promise<void> {
       const result: ChatSendResult = {
         stopReason: controller.signal.aborted ? 'cancelled' : stopReason,
       };
-      conversation.end(result.stopReason === 'refusal' ? undefined : written);
+      turn.end(result.stopReason === 'refusal' ? undefined : written);
       await reply(request.id, result);
     } catch (error) {
-      conversation.end(controller.signal.aborted ? written : undefined);
+      turn.end(controller.signal.aborted ? written : undefined);
       if (controller.signal.aborted) {
         const result: ChatSendResult = { stopReason: 'cancelled' };
         await reply(request.id, result);
@@ -282,7 +282,8 @@ export async function serve(options: ServerOptions): Promise<void> {
         await fail(request.id, ErrorCode.InternalError, 'the model request failed');
       }
     } finally {
-      conversation.end();
+      // Has no effect when the turn has ended, even if the next one has begun.
+      turn.end();
       running.delete(request.id);
     }
   };

@@ -4,10 +4,11 @@ import { Conversation } from './conversation.js';
 describe('Conversation', () => {
   it('sends the kept turns followed by the new message', () => {
     const conversation = new Conversation();
-    expect(conversation.begin('first')).toEqual([{ role: 'user', text: 'first' }]);
-    conversation.end('one');
+    const first = conversation.begin('first');
+    expect(first.messages).toEqual([{ role: 'user', text: 'first' }]);
+    first.end('one');
 
-    expect(conversation.begin('second')).toEqual([
+    expect(conversation.begin('second').messages).toEqual([
       { role: 'user', text: 'first' },
       { role: 'assistant', text: 'one' },
       { role: 'user', text: 'second' },
@@ -16,11 +17,10 @@ describe('Conversation', () => {
 
   it('keeps nothing of a turn that ends without a reply', () => {
     const conversation = new Conversation();
-    conversation.begin('first');
-    conversation.end();
+    conversation.begin('first').end();
 
     expect(conversation.messages).toEqual([]);
-    expect(conversation.begin('again')).toEqual([{ role: 'user', text: 'again' }]);
+    expect(conversation.begin('again').messages).toEqual([{ role: 'user', text: 'again' }]);
   });
 
   it.each([
@@ -28,8 +28,7 @@ describe('Conversation', () => {
     ['only spaces and line breaks', ' \n\t'],
   ])('keeps nothing of a turn whose reply is %s', (_name, reply) => {
     const conversation = new Conversation();
-    conversation.begin('first');
-    conversation.end(reply);
+    conversation.begin('first').end(reply);
 
     expect(conversation.messages).toEqual([]);
   });
@@ -37,19 +36,19 @@ describe('Conversation', () => {
   it('is busy from the beginning of a turn to its end', () => {
     const conversation = new Conversation();
     expect(conversation.busy).toBe(false);
-    conversation.begin('first');
+    const turn = conversation.begin('first');
     expect(conversation.busy).toBe(true);
     expect(() => conversation.begin('second')).toThrow('already in progress');
-    conversation.end('one');
+    turn.end('one');
     expect(conversation.busy).toBe(false);
   });
 
-  it('ignores an end when no turn is in progress', () => {
+  it('ends a turn once: later calls change nothing', () => {
     const conversation = new Conversation();
-    conversation.begin('first');
-    conversation.end('one');
-    conversation.end('two');
-    conversation.end();
+    const turn = conversation.begin('first');
+    turn.end('one');
+    turn.end('two');
+    turn.end();
 
     expect(conversation.messages).toEqual([
       { role: 'user', text: 'first' },
@@ -57,12 +56,32 @@ describe('Conversation', () => {
     ]);
   });
 
+  it('does not let a turn that has ended end the turn after it', () => {
+    const conversation = new Conversation();
+    const first = conversation.begin('first');
+    first.end('one');
+    const second = conversation.begin('second');
+    // Cleanup of the first turn arrives late.
+    first.end();
+    first.end('stray');
+
+    expect(conversation.busy).toBe(true);
+    expect(() => conversation.begin('third')).toThrow('already in progress');
+    second.end('two');
+    expect(conversation.messages).toEqual([
+      { role: 'user', text: 'first' },
+      { role: 'assistant', text: 'one' },
+      { role: 'user', text: 'second' },
+      { role: 'assistant', text: 'two' },
+    ]);
+  });
+
   it('does not let a sent list change when later turns are kept', () => {
     const conversation = new Conversation();
-    const sent = conversation.begin('first');
-    conversation.end('one');
+    const first = conversation.begin('first');
+    first.end('one');
     conversation.begin('second');
 
-    expect(sent).toEqual([{ role: 'user', text: 'first' }]);
+    expect(first.messages).toEqual([{ role: 'user', text: 'first' }]);
   });
 });

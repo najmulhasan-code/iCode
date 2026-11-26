@@ -342,6 +342,49 @@ describe('a connection that fails', () => {
   });
 });
 
+describe('a turn whose answer is still being written', () => {
+  it('does not end the next turn of the same conversation when its own cleanup runs', async () => {
+    const { model, streams } = controlledModel();
+    let release: (() => void) | undefined;
+    const client = connect(model, (written) => {
+      client.record(written);
+      // The answer to the first chat request reaches the client, but its write stays pending.
+      if (written.includes('"id":2,') && release === undefined) {
+        return new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      return undefined;
+    });
+    client.send(INITIALIZE);
+    client.send(CREATE);
+    client.send(chatRequest(2));
+    await client.response(1);
+    await settle();
+    streams[0]?.events.push(text('reply-1'));
+    streams[0]?.events.push(END);
+    await client.response(2);
+
+    // The client has its answer, so it sends the next message at once.
+    client.send(chatRequest(3));
+    await settle();
+    expect(streams).toHaveLength(2);
+    release?.();
+    await settle();
+
+    // The second turn is still running, so a third message must be refused.
+    client.send(chatRequest(4));
+    await settle();
+    streams[1]?.events.push(text('reply-2'));
+    streams[1]?.events.push(END);
+    await client.response(3);
+    expect(await client.response(4)).toMatchObject({
+      error: { code: CoreErrorCode.ConversationBusy },
+    });
+    expect(streams).toHaveLength(2);
+  });
+});
+
 describe('a client that reads slowly', () => {
   it('slows the core down, which then asks the model for no more than it can send', async () => {
     const { model, streams } = controlledModel();
