@@ -2,6 +2,7 @@ import {
   CANCEL_METHOD,
   CHAT_DELTA_METHOD,
   CHAT_SEND_METHOD,
+  CONVERSATION_CREATE_METHOD,
   type CancelParams,
   type ChatDeltaParams,
   type ChatSendParams,
@@ -14,6 +15,7 @@ import {
   SET_MODEL_METHOD,
   type SetModelParams,
   type StopReason,
+  isConversationCreateResult,
 } from '@icode/protocol';
 import type { CoreSession } from './coreProcess';
 import type { ModelSettings } from './settings';
@@ -66,11 +68,16 @@ function toChatError(error: unknown): ChatError {
  * Sends chat messages to the core and passes the pieces of each reply on. It
  * tells the core which model to use whenever the settings, the key or the
  * core process have changed. One reply is written at a time.
+ *
+ * All messages belong to one conversation, which the core keeps. This class
+ * holds only its id. A core that had to be started again has lost the
+ * conversation, so a new one is begun there.
  */
 export class ChatSession {
   readonly #dependencies: ChatSessionDependencies;
   readonly #listeners = new Map<RequestId, (text: string) => void>();
   #applied: { readonly generation: number; readonly fingerprint: string } | undefined;
+  #conversation: { readonly generation: number; readonly id: string } | undefined;
   #active: { readonly session: CoreSession; readonly id: RequestId } | undefined;
   #sending = false;
   #cancelRequested = false;
@@ -133,8 +140,18 @@ export class ChatSession {
       if (this.#wasCancelled()) {
         return 'cancelled';
       }
+      if (this.#conversation?.generation !== session.generation) {
+        const created = await session.connection.request(CONVERSATION_CREATE_METHOD);
+        if (!isConversationCreateResult(created)) {
+          throw new ChatError('The core did not start a conversation.');
+        }
+        this.#conversation = { generation: session.generation, id: created.conversationId };
+      }
+      if (this.#wasCancelled()) {
+        return 'cancelled';
+      }
 
-      const chat: ChatSendParams = { text };
+      const chat: ChatSendParams = { conversationId: this.#conversation.id, text };
       const sent = session.connection.send(CHAT_SEND_METHOD, chat);
       this.#listeners.set(sent.id, onText);
       this.#active = { session, id: sent.id };

@@ -2,8 +2,10 @@ import {
   CANCEL_METHOD,
   CHAT_DELTA_METHOD,
   CHAT_SEND_METHOD,
+  CONVERSATION_CREATE_METHOD,
   type ChatDeltaParams,
   type ChatSendResult,
+  type ConversationCreateResult,
   CoreErrorCode,
   ErrorCode,
   INITIALIZE_METHOD,
@@ -30,6 +32,8 @@ import {
   isSupportedVersion,
   parseMessage,
 } from '@icode/protocol';
+import { randomUUID } from 'node:crypto';
+import { Conversation } from './conversation.js';
 import { type Model, ModelConfigError, ModelError } from './model.js';
 
 export interface ServerOptions {
@@ -50,6 +54,8 @@ export interface ServerOptions {
    * reported without its message, which could contain the parameters.
    */
   readonly createModel?: (params: SetModelParams) => Model;
+  /** Names a new conversation. By default a random id. */
+  readonly createConversationId?: () => string;
   readonly info: PeerInfo;
   /** Receives diagnostics. They never go to the client's stream. */
   readonly log?: (text: string) => void;
@@ -92,7 +98,10 @@ export async function serve(options: ServerOptions): Promise<void> {
   const log = options.log ?? (() => undefined);
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 5000;
   const decoder = new LineDecoder();
+  const createConversationId = options.createConversationId ?? randomUUID;
   const running = new Map<RequestId, AbortController>();
+  /** The conversations of this client. They live as long as the connection. */
+  const conversations = new Map<string, Conversation>();
   const tasks = new Set<Promise<void>>();
   /** Aborted when the connection can no longer be used. */
   const connection = new AbortController();
@@ -182,17 +191,40 @@ export async function serve(options: ServerOptions): Promise<void> {
     void reply(request.id, {});
   };
 
-  /** Runs one chat request to its single answer. It never rejects. */
-  const chat = async (request: RequestMessage, text: string, model: Model): Promise<void> => {
+  const createConversation = (request: RequestMessage): void => {
+    let conversationId = createConversationId();
+    while (conversations.has(conversationId)) {
+      conversationId = createConversationId();
+    }
+    conversations.set(conversationId, new Conversation());
+    const result: ConversationCreateResult = { conversationId };
+    void reply(request.id, result);
+  };
+
+  /**
+   * Runs one turn of a conversation to its single answer. It never rejects.
+   *
+   * What the conversation keeps of the turn is decided before the answer is
+   * sent, so the client can send the next message as soon as it has the
+   * answer. A turn that ended, reached the output limit or was stopped by the
+   * user is kept with the text written so far. A turn that failed or was
+   * declined is not kept: the user can send the message again, and a declined
+   * request does not stay in what later requests carry.
+   */
+  const chat = async (
+    request: RequestMessage,
+    text: string,
+    model: Model,
+    conversation: Conversation,
+  ): Promise<void> => {
     const controller = new AbortController();
     running.set(request.id, controller);
     const cancelled = whenAborted(controller.signal);
+    const messages = conversation.begin(text);
+    let written = '';
     let stopReason: StopReason | undefined;
     try {
-      const stream = model.stream({
-        messages: [{ role: 'user', text }],
-        signal: controller.signal,
-      });
+      const stream = model.stream({ messages, signal: controller.signal });
       const events = stream[Symbol.asyncIterator]();
       try {
         while (stopReason === undefined) {
@@ -205,6 +237,7 @@ export async function serve(options: ServerOptions): Promise<void> {
           } else if (step.done === true) {
             throw new Error('the model reply ended without an end event');
           } else if (step.value.type === 'text') {
+            written += step.value.text;
             const params: ChatDeltaParams = { requestId: request.id, text: step.value.text };
             await Promise.race([
               send({ jsonrpc: '2.0', method: CHAT_DELTA_METHOD, params }),
@@ -224,8 +257,10 @@ export async function serve(options: ServerOptions): Promise<void> {
       const result: ChatSendResult = {
         stopReason: controller.signal.aborted ? 'cancelled' : stopReason,
       };
+      conversation.end(result.stopReason === 'refusal' ? undefined : written);
       await reply(request.id, result);
     } catch (error) {
+      conversation.end(controller.signal.aborted ? written : undefined);
       if (controller.signal.aborted) {
         const result: ChatSendResult = { stopReason: 'cancelled' };
         await reply(request.id, result);
@@ -247,6 +282,7 @@ export async function serve(options: ServerOptions): Promise<void> {
         await fail(request.id, ErrorCode.InternalError, 'the model request failed');
       }
     } finally {
+      conversation.end();
       running.delete(request.id);
     }
   };
@@ -264,12 +300,16 @@ export async function serve(options: ServerOptions): Promise<void> {
       setModel(request);
       return;
     }
+    if (request.method === CONVERSATION_CREATE_METHOD) {
+      createConversation(request);
+      return;
+    }
     if (request.method !== CHAT_SEND_METHOD) {
       void fail(request.id, ErrorCode.MethodNotFound, `unknown method ${request.method}`);
       return;
     }
     if (!isChatSendParams(request.params)) {
-      void fail(request.id, ErrorCode.InvalidParams, 'chat/send needs a text');
+      void fail(request.id, ErrorCode.InvalidParams, 'chat/send needs a conversation and a text');
       return;
     }
     if (running.has(request.id)) {
@@ -284,8 +324,21 @@ export async function serve(options: ServerOptions): Promise<void> {
       void fail(request.id, CoreErrorCode.ModelNotSet, 'no model has been chosen yet');
       return;
     }
+    const conversation = conversations.get(request.params.conversationId);
+    if (conversation === undefined) {
+      void fail(request.id, CoreErrorCode.UnknownConversation, 'there is no such conversation');
+      return;
+    }
+    if (conversation.busy) {
+      void fail(
+        request.id,
+        CoreErrorCode.ConversationBusy,
+        'the last reply in this conversation has not ended',
+      );
+      return;
+    }
     // A request keeps the model it started with, even if another is chosen meanwhile.
-    const task = chat(request, request.params.text, model)
+    const task = chat(request, request.params.text, model, conversation)
       .catch((error: unknown) => {
         closeConnection(error);
       })

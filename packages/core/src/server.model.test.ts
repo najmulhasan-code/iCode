@@ -19,7 +19,13 @@ const INITIALIZE = {
   method: 'initialize',
   params: { protocolVersion: PROTOCOL_VERSION, client: { name: 'test', version: '0' } },
 };
-const chat = (id: number) => ({ jsonrpc: '2.0', id, method: 'chat/send', params: { text: 'hi' } });
+const CREATE = { jsonrpc: '2.0', id: 90, method: 'conversation/create' };
+const chat = (id: number) => ({
+  jsonrpc: '2.0',
+  id,
+  method: 'chat/send',
+  params: { conversationId: 'c1', text: 'hi' },
+});
 const setModel = (id: number, params: unknown) => ({
   jsonrpc: '2.0',
   id,
@@ -56,6 +62,7 @@ async function exchange(
   await serve({
     ...options,
     input: input(),
+    createConversationId: () => 'c1',
     write: (text) => {
       written += text;
       for (const line of text.split('\n')) {
@@ -94,7 +101,7 @@ describe('model/set', () => {
   it('chooses the model that later chat requests use', async () => {
     const factory = recordingFactory();
     const params = { provider: 'anthropic', apiKey: KEY, model: 'some-model' };
-    const run = await exchange(factory, [INITIALIZE, setModel(2, params), chat(3)]);
+    const run = await exchange(factory, [INITIALIZE, CREATE, setModel(2, params), chat(3)]);
 
     expect(run.response(2)).toEqual({ jsonrpc: '2.0', id: 2, result: {} });
     expect(factory.calls).toEqual([params]);
@@ -106,6 +113,7 @@ describe('model/set', () => {
     const factory = recordingFactory();
     const run = await exchange(factory, [
       INITIALIZE,
+      CREATE,
       setModel(2, { provider: 'anthropic', apiKey: KEY }),
       chat(3),
       setModel(4, { provider: 'openai-compatible', apiKey: KEY, model: 'm' }),
@@ -190,6 +198,7 @@ describe('model/set', () => {
       INITIALIZE,
       setModel(2, { provider: 'anthropic', apiKey: KEY }),
       setModel(3, { provider: 'nobody', apiKey: KEY }),
+      CREATE,
       chat(4),
     ]);
 
@@ -200,7 +209,7 @@ describe('model/set', () => {
 
 describe('chat/send', () => {
   it('is refused until a model has been chosen', async () => {
-    const run = await exchange(recordingFactory(), [INITIALIZE, chat(2)]);
+    const run = await exchange(recordingFactory(), [INITIALIZE, CREATE, chat(2)]);
 
     expect(run.response(2)).toMatchObject({ error: { code: CoreErrorCode.ModelNotSet } });
   });

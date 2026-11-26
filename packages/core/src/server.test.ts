@@ -20,6 +20,8 @@ const INITIALIZE = {
   params: { protocolVersion: PROTOCOL_VERSION, client: { name: 'test', version: '0' } },
 };
 
+const CREATE = { jsonrpc: '2.0', id: 90, method: 'conversation/create' };
+
 /** A client connected to a core that runs in this process. */
 function connect(model: Model = createFixedModel(['Hello', ', ', 'world'])) {
   const received: Message[] = [];
@@ -59,6 +61,7 @@ function connect(model: Model = createFixedModel(['Hello', ', ', 'world'])) {
       }
     },
     model,
+    createConversationId: () => 'c1',
     info: INFO,
   });
 
@@ -134,7 +137,12 @@ describe('initialize', () => {
 
   it('refuses any other request before initialize', async () => {
     const client = connect();
-    client.send({ jsonrpc: '2.0', id: 1, method: 'chat/send', params: { text: 'hi' } });
+    client.send({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'chat/send',
+      params: { conversationId: 'c1', text: 'hi' },
+    });
     expect(await client.response(1)).toMatchObject({
       error: { code: CoreErrorCode.NotInitialized },
     });
@@ -145,7 +153,13 @@ describe('chat/send', () => {
   it('streams the reply in pieces and then answers the request', async () => {
     const client = connect();
     client.send(INITIALIZE);
-    client.send({ jsonrpc: '2.0', id: 2, method: 'chat/send', params: { text: 'hi' } });
+    client.send(CREATE);
+    client.send({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'chat/send',
+      params: { conversationId: 'c1', text: 'hi' },
+    });
     const response = await client.response(2);
 
     expect(response).toEqual({ jsonrpc: '2.0', id: 2, result: { stopReason: 'end' } });
@@ -164,7 +178,13 @@ describe('chat/send', () => {
     const pieces = Array.from({ length: 50 }, (_, index) => `piece ${String(index)} `);
     const client = connect(createFixedModel(pieces, 5));
     client.send(INITIALIZE);
-    client.send({ jsonrpc: '2.0', id: 2, method: 'chat/send', params: { text: 'hi' } });
+    client.send(CREATE);
+    client.send({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'chat/send',
+      params: { conversationId: 'c1', text: 'hi' },
+    });
     await client.until(() => deltas(client.received).length > 0);
     client.send({ jsonrpc: '2.0', method: '$/cancel', params: { id: 2 } });
 
@@ -172,7 +192,7 @@ describe('chat/send', () => {
     expect(deltas(client.received).length).toBeLessThan(pieces.length);
   });
 
-  it('refuses params without a text', async () => {
+  it('refuses params without a conversation or a text', async () => {
     const client = connect();
     client.send(INITIALIZE);
     client.send({ jsonrpc: '2.0', id: 2, method: 'chat/send', params: {} });
@@ -189,7 +209,13 @@ describe('chat/send', () => {
     };
     const client = connect(failing);
     client.send(INITIALIZE);
-    client.send({ jsonrpc: '2.0', id: 2, method: 'chat/send', params: { text: 'hi' } });
+    client.send(CREATE);
+    client.send({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'chat/send',
+      params: { conversationId: 'c1', text: 'hi' },
+    });
     const response = await client.response(2);
 
     expect(response).toMatchObject({ error: { code: ErrorCode.InternalError } });
@@ -225,7 +251,13 @@ describe('the connection', () => {
     const pieces = Array.from({ length: 50 }, () => 'piece ');
     const client = connect(createFixedModel(pieces, 5));
     client.send(INITIALIZE);
-    client.send({ jsonrpc: '2.0', id: 2, method: 'chat/send', params: { text: 'hi' } });
+    client.send(CREATE);
+    client.send({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'chat/send',
+      params: { conversationId: 'c1', text: 'hi' },
+    });
     await client.until(() => deltas(client.received).length > 0);
     client.end();
     await client.closed;

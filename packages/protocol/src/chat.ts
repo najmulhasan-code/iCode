@@ -1,6 +1,12 @@
 import type { RequestId } from './messages.js';
 
-/** Request: send one user message to the model and stream the reply. */
+/** Request: start a new, empty conversation. The core answers with its id. */
+export const CONVERSATION_CREATE_METHOD = 'conversation/create';
+
+/**
+ * Request: add one user message to a conversation, send the conversation to
+ * the model and stream the reply.
+ */
 export const CHAT_SEND_METHOD = 'chat/send';
 
 /** Notification from the core: the next piece of the reply to a chat request. */
@@ -9,7 +15,14 @@ export const CHAT_DELTA_METHOD = 'chat/delta';
 /** Notification from a client: stop the request with the given id. */
 export const CANCEL_METHOD = '$/cancel';
 
+export interface ConversationCreateResult {
+  /** Names the conversation in later requests on this connection. */
+  readonly conversationId: string;
+}
+
 export interface ChatSendParams {
+  readonly conversationId: string;
+  /** The message from the user. It must contain more than white space. */
   readonly text: string;
 }
 
@@ -39,7 +52,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function isChatSendParams(value: unknown): value is ChatSendParams {
-  return isRecord(value) && typeof value.text === 'string';
+  return (
+    isRecord(value) &&
+    typeof value.conversationId === 'string' &&
+    typeof value.text === 'string' &&
+    value.text.trim() !== ''
+  );
+}
+
+export function isConversationCreateResult(value: unknown): value is ConversationCreateResult {
+  return isRecord(value) && typeof value.conversationId === 'string';
 }
 
 export function isCancelParams(value: unknown): value is CancelParams {
@@ -63,6 +85,10 @@ export const CoreErrorCode = {
   ModelRequestFailed: -32004,
   /** A chat request arrived before any model was chosen. */
   ModelNotSet: -32005,
+  /** A request named a conversation this connection does not have. */
+  UnknownConversation: -32006,
+  /** A message arrived for a conversation whose last reply has not ended. */
+  ConversationBusy: -32007,
 } as const;
 
 /** Carried in the `data` of a `ModelRequestFailed` error. */

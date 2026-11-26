@@ -19,6 +19,9 @@ interface Request {
   readonly [field: string]: unknown;
 }
 
+/** A request that is written once the answers before it are known. */
+type Step = Request | ((answers: readonly Message[]) => Request);
+
 interface Run {
   readonly messages: Message[];
   readonly exitCode: number | null;
@@ -30,7 +33,7 @@ interface Run {
  * after another, each once the one before has been answered. The connection
  * is closed after the last answer, as a client would do.
  */
-function runCore(requests: readonly Request[]): Promise<Run> {
+function runCore(steps: readonly Step[]): Promise<Run> {
   return new Promise((resolve, reject) => {
     // The SDKs print diagnostics when these are set. None of it may reach standard output.
     const env = { ...process.env, OPENAI_LOG: 'debug', ANTHROPIC_LOG: 'debug' };
@@ -38,19 +41,23 @@ function runCore(requests: readonly Request[]): Promise<Run> {
     let stdout = '';
     let stderr = '';
     let next = 0;
+    let current: Request | undefined;
+    const completeLines = (): string[] => stdout.split('\n').slice(0, -1);
     const sendNext = (): void => {
-      const request = requests[next];
-      if (request === undefined) {
+      const step = steps[next];
+      if (step === undefined) {
+        current = undefined;
         child.stdin.end();
-      } else {
-        child.stdin.write(`${JSON.stringify(request)}\n`);
+        return;
       }
+      current =
+        typeof step === 'function' ? step(completeLines().map((line) => parseMessage(line))) : step;
+      child.stdin.write(`${JSON.stringify(current)}\n`);
     };
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
       stdout += chunk;
-      const current = requests[next];
       const answer = `{"jsonrpc":"2.0","id":${String(current?.id)},`;
-      if (current !== undefined && stdout.split('\n').some((line) => line.startsWith(answer))) {
+      if (current !== undefined && completeLines().some((line) => line.startsWith(answer))) {
         next += 1;
         sendNext();
       }
@@ -81,12 +88,17 @@ const INITIALIZE = {
   method: 'initialize',
   params: { protocolVersion: PROTOCOL_VERSION, client: { name: 'test', version: '0' } },
 };
-const chat = (id: number) => ({
-  jsonrpc: '2.0',
-  id,
-  method: 'chat/send',
-  params: { text: 'hello' },
-});
+const CREATE = { jsonrpc: '2.0', id: 90, method: 'conversation/create' };
+
+/** A chat request in the conversation that `CREATE` was answered with. */
+const chat =
+  (id: number, text = 'hello') =>
+  (answers: readonly Message[]): Request => {
+    const created = answers.find((message) => isResponse(message) && message.id === CREATE.id);
+    const result = created !== undefined && 'result' in created ? created.result : undefined;
+    const { conversationId } = result as { conversationId: string };
+    return { jsonrpc: '2.0', id, method: 'chat/send', params: { conversationId, text } };
+  };
 
 describe('the core process', () => {
   it('reaches a model server chosen with model/set and streams its reply', async () => {
@@ -121,7 +133,9 @@ describe('the core process', () => {
           baseUrl: api.url,
         },
       },
+      CREATE,
       chat(3),
+      chat(4, 'and again'),
     ]);
 
     expect(run.exitCode).toBe(0);
@@ -131,8 +145,14 @@ describe('the core process', () => {
       .filter(isNotification)
       .map((message) => (message.params as { text: string }).text)
       .join('');
-    expect(reply).toBe('Hello world');
-    expect(run.messages.at(-1)).toEqual({ jsonrpc: '2.0', id: 3, result: { stopReason: 'end' } });
+    expect(reply).toBe('Hello worldHello world');
+    expect(run.messages.at(-1)).toEqual({ jsonrpc: '2.0', id: 4, result: { stopReason: 'end' } });
+    // The second request carries the first turn, so the model can refer to it.
+    expect(api.requests[1]?.body.messages).toEqual([
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'Hello world' },
+      { role: 'user', content: 'and again' },
+    ]);
     expect(api.requests[0]?.headers.authorization).toBe('Bearer test-key');
     expect(api.requests[0]?.body).toMatchObject({ model: 'some-model' });
   });
@@ -140,6 +160,7 @@ describe('the core process', () => {
   it('refuses a chat request before a model is chosen, and a provider without its model name', async () => {
     const run = await runCore([
       INITIALIZE,
+      CREATE,
       chat(2),
       {
         jsonrpc: '2.0',
