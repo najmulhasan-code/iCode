@@ -10,6 +10,7 @@ import {
   type InitializeResult,
   LineDecoder,
   type Message,
+  type ModelRequestFailedData,
   type NotificationMessage,
   PROTOCOL_VERSION,
   type PeerInfo,
@@ -26,7 +27,7 @@ import {
   isSupportedVersion,
   parseMessage,
 } from '@icode/protocol';
-import type { Model } from './model.js';
+import { type Model, ModelError } from './model.js';
 
 export interface ServerOptions {
   /** Text from the client, in chunks of any size. */
@@ -192,6 +193,19 @@ export async function serve(options: ServerOptions): Promise<void> {
       if (controller.signal.aborted) {
         const result: ChatSendResult = { stopReason: 'cancelled' };
         await reply(request.id, result);
+      } else if (error instanceof ModelError) {
+        // The provider's own wording stays in the log. The client gets the kind.
+        log(`model request failed (${error.kind}): ${error.message}`);
+        const data: ModelRequestFailedData = { kind: error.kind };
+        await send({
+          jsonrpc: '2.0',
+          id: request.id,
+          error: {
+            code: CoreErrorCode.ModelRequestFailed,
+            message: 'the model request failed',
+            data,
+          },
+        });
       } else {
         log(`chat request failed: ${describe(error)}`);
         await fail(request.id, ErrorCode.InternalError, 'the model request failed');

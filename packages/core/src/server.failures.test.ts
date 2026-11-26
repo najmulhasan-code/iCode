@@ -8,7 +8,7 @@ import {
   parseMessage,
 } from '@icode/protocol';
 import { describe, expect, it } from 'vitest';
-import type { Model, ModelEvent } from './model.js';
+import { type Model, ModelError, type ModelEvent } from './model.js';
 import { serve } from './server.js';
 
 const INITIALIZE = {
@@ -195,6 +195,27 @@ describe('a model that does not cooperate', () => {
     streams[0]?.events.push({ type: 'end', reason: 'max_tokens' });
 
     expect(await client.response(2)).toMatchObject({ result: { stopReason: 'max_tokens' } });
+  });
+});
+
+describe('a model request that fails', () => {
+  it('is reported with its kind and without the provider wording', async () => {
+    const failing: Model = {
+      // eslint-disable-next-line require-yield
+      async *stream() {
+        await Promise.resolve();
+        throw new ModelError('rate_limit', 'provider detail', 429);
+      },
+    };
+    const client = connect(failing);
+    client.send(INITIALIZE);
+    client.send(chatRequest(2));
+    const response = await client.response(2);
+
+    expect(response).toMatchObject({
+      error: { code: CoreErrorCode.ModelRequestFailed, data: { kind: 'rate_limit' } },
+    });
+    expect(JSON.stringify(response)).not.toContain('provider detail');
   });
 });
 
