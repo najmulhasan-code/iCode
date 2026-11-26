@@ -6,6 +6,7 @@
   "private": true,
   "publisher": "najmulhasan-code",
   "license": "MIT",
+  "icon": "media/icode.png",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/najmulhasan-code/iCode.git",
@@ -25,7 +26,7 @@
         {
           "id": "icode",
           "title": "iCode",
-          "icon": "media/icon.svg"
+          "icon": "media/icode-mono.svg"
         }
       ]
     },
