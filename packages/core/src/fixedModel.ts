@@ -14,6 +14,7 @@ export function createFixedModel(pieces: readonly string[], delayMs = 0): Model 
         }
         yield { type: 'text', text };
       }
+      yield { type: 'end', reason: 'end' };
     },
   };
 }

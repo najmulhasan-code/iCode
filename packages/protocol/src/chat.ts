@@ -13,8 +13,11 @@ export interface ChatSendParams {
   readonly text: string;
 }
 
-/** Why a reply ended. */
-export type StopReason = 'end' | 'cancelled';
+/**
+ * Why a reply ended: the model finished, the model reached its output limit,
+ * or the request was cancelled.
+ */
+export type StopReason = 'end' | 'max_tokens' | 'cancelled';
 
 export interface ChatSendResult {
   readonly stopReason: StopReason;
