@@ -38,6 +38,13 @@ describe('parseMessage', () => {
     expect(isRequest(message)).toBe(false);
   });
 
+  it('reads a request and a success response whose id is null', () => {
+    const request = parseMessage('{"jsonrpc":"2.0","id":null,"method":"ping"}');
+    expect(isRequest(request)).toBe(true);
+    expect(isNotification(request)).toBe(false);
+    expect(isResponse(parseMessage('{"jsonrpc":"2.0","id":null,"result":1}'))).toBe(true);
+  });
+
   it('reads a success response, including a null result', () => {
     expect(isResponse(parseMessage('{"jsonrpc":"2.0","id":1,"result":null}'))).toBe(true);
   });
@@ -59,13 +66,21 @@ describe('parseMessage', () => {
     ['a method that is not text', '{"jsonrpc":"2.0","id":1,"method":5}'],
     ['params that are not structured', '{"jsonrpc":"2.0","id":1,"method":"m","params":3}'],
     ['a request id that is an object', '{"jsonrpc":"2.0","id":{},"method":"m"}'],
-    ['a request id that is null', '{"jsonrpc":"2.0","id":null,"method":"m"}'],
+    ['a request id that overflows', '{"jsonrpc":"2.0","id":1e400,"method":"m"}'],
     ['neither a method nor a result', '{"jsonrpc":"2.0","id":1}'],
     [
       'both a result and an error',
       '{"jsonrpc":"2.0","id":1,"result":1,"error":{"code":1,"message":"x"}}',
     ],
-    ['a success response with a null id', '{"jsonrpc":"2.0","id":null,"result":1}'],
+    ['a response without an id', '{"jsonrpc":"2.0","result":1}'],
+    [
+      'an error with a fractional code',
+      '{"jsonrpc":"2.0","id":1,"error":{"code":1.5,"message":"x"}}',
+    ],
+    [
+      'an error with an overflowing code',
+      '{"jsonrpc":"2.0","id":1,"error":{"code":1e400,"message":"x"}}',
+    ],
     ['an error without a code', '{"jsonrpc":"2.0","id":1,"error":{"message":"x"}}'],
     ['an error that is not an object', '{"jsonrpc":"2.0","id":1,"error":"x"}'],
   ])('rejects %s', (_name, text) => {

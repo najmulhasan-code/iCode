@@ -6,7 +6,11 @@
 
 export const JSONRPC_VERSION = '2.0';
 
-export type RequestId = number | string;
+/**
+ * Identifier that ties a response to its request. JSON-RPC permits null,
+ * although a client should not choose it.
+ */
+export type RequestId = number | string | null;
 
 export interface RequestMessage {
   readonly jsonrpc: typeof JSONRPC_VERSION;
@@ -36,7 +40,7 @@ export interface SuccessResponse {
 export interface ErrorResponse {
   readonly jsonrpc: typeof JSONRPC_VERSION;
   /** Null when the request could not be read far enough to learn its id. */
-  readonly id: RequestId | null;
+  readonly id: RequestId;
   readonly error: ErrorObject;
 }
 
@@ -68,7 +72,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isRequestId(value: unknown): value is RequestId {
-  return typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value));
+  return (
+    value === null ||
+    typeof value === 'string' ||
+    (typeof value === 'number' && Number.isFinite(value))
+  );
 }
 
 function invalid(reason: string): ProtocolError {
@@ -103,7 +111,7 @@ export function parseMessage(text: string): Message {
       throw invalid('params is neither an object nor an array');
     }
     if ('id' in value && !isRequestId(value.id)) {
-      throw invalid('request id is neither a string nor a number');
+      throw invalid('request id is not a string, a number or null');
     }
     return value as unknown as RequestMessage | NotificationMessage;
   }
@@ -113,18 +121,15 @@ export function parseMessage(text: string): Message {
   if (hasResult === hasError) {
     throw invalid('message is neither a request nor a response');
   }
-  if (hasResult) {
-    if (!isRequestId(value.id)) {
-      throw invalid('response id is neither a string nor a number');
-    }
-    return value as unknown as SuccessResponse;
-  }
-  if (value.id !== null && !isRequestId(value.id)) {
+  if (!isRequestId(value.id)) {
     throw invalid('response id is not a string, a number or null');
   }
+  if (hasResult) {
+    return value as unknown as SuccessResponse;
+  }
   const error = value.error;
-  if (!isRecord(error) || typeof error.code !== 'number' || typeof error.message !== 'string') {
-    throw invalid('error is not an object with a numeric code and a text message');
+  if (!isRecord(error) || !Number.isInteger(error.code) || typeof error.message !== 'string') {
+    throw invalid('error is not an object with an integer code and a text message');
   }
   return value as unknown as ErrorResponse;
 }
