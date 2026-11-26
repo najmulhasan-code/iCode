@@ -10,9 +10,13 @@ const EXTENSION_ID = 'najmulhasan-code.icode';
 interface TestApi {
   setApiKey(provider: string, apiKey: string): Promise<void>;
   sendMessage(text: string): Promise<{ readonly text: string; readonly stopReason: string }>;
-  submitInChatView(
-    text: string,
-  ): Promise<{ readonly text: string; readonly stopReason: string } | { readonly error: string }>;
+  submitInChatView(text: string): Promise<{
+    readonly text?: string;
+    readonly stopReason?: string;
+    readonly error?: string;
+    /** What the page displayed for this message. */
+    readonly shown?: string;
+  }>;
 }
 
 interface SeenRequest {
@@ -178,7 +182,12 @@ export const engineTests: readonly TestCase[] = [
             // extension, and the reply is streamed back into the panel.
             const outcome = await extension.submitInChatView('hello from the panel');
 
-            assert.deepEqual(outcome, { text: 'Hello from the panel', stopReason: 'end' });
+            // `shown` is read back from the page, so the reply was really displayed.
+            assert.deepEqual(outcome, {
+              text: 'Hello from the panel',
+              stopReason: 'end',
+              shown: 'Hello from the panel',
+            });
             assert.deepEqual(server.requests.at(-1)?.body.messages, [
               { role: 'user', content: 'hello from the panel' },
             ]);
@@ -197,8 +206,8 @@ export const engineTests: readonly TestCase[] = [
       await withSettings({ provider: 'anthropic' }, async () => {
         const outcome = await extension.submitInChatView('hello');
 
-        assert.ok('error' in outcome);
-        assert.match(outcome.error, /No API key is set/);
+        assert.match(outcome.error ?? '', /No API key is set/);
+        assert.match(outcome.shown ?? '', /No API key is set/);
       });
     },
   },

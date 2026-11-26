@@ -1,11 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import type { StopReason } from '@icode/protocol';
 import * as vscode from 'vscode';
-import type { ChatSession } from './chatSession';
-
-/** How one message sent from the panel ended. */
-export type ChatOutcome =
-  { readonly text: string; readonly stopReason: StopReason } | { readonly error: string };
+import type { ChatPanelController, PanelPort } from './chatPanel';
 
 /** The logo, drawn inline so that its dot can be animated by the stylesheet. */
 const MARK = `<svg class="mark" viewBox="0 0 128 128" aria-hidden="true">
@@ -15,7 +10,8 @@ const MARK = `<svg class="mark" viewBox="0 0 128 128" aria-hidden="true">
     </svg>`;
 
 /**
- * Provides the chat panel shown in the iCode view of the side bar.
+ * Shows the chat panel in the iCode view of the side bar and connects its
+ * page to the controller.
  *
  * The panel is a webview. It cannot reach the file system or the VS Code API,
  * and its content security policy allows the bundled stylesheet and the one
@@ -25,100 +21,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   static readonly viewId = 'icode.chat';
 
   readonly #mediaUri: vscode.Uri;
-  readonly #chat: ChatSession;
-  #view: vscode.WebviewView | undefined;
-  #ready: Promise<void> = Promise.resolve();
-  #busy = false;
-  #waiting: ((outcome: ChatOutcome) => void)[] = [];
+  readonly #controller: ChatPanelController;
 
-  constructor(extensionUri: vscode.Uri, chat: ChatSession) {
+  constructor(extensionUri: vscode.Uri, controller: ChatPanelController) {
     this.#mediaUri = vscode.Uri.joinPath(extensionUri, 'media');
-    this.#chat = chat;
+    this.#controller = controller;
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
     const { webview } = view;
-    this.#view = view;
     webview.options = {
       enableScripts: true,
       localResourceRoots: [this.#mediaUri],
     };
-    this.#ready = new Promise((resolve) => {
-      webview.onDidReceiveMessage((message: unknown) => {
-        if (isMessage(message, 'ready')) {
-          resolve();
-        } else {
-          this.#handle(webview, message);
-        }
-      });
+    const port: PanelPort = {
+      post: (message) => {
+        void webview.postMessage(message);
+      },
+    };
+    webview.onDidReceiveMessage((message: unknown) => {
+      // The page says when its script is running. Until then it cannot receive anything.
+      if ((message as { type?: unknown } | null)?.type === 'ready') {
+        this.#controller.attach(port);
+      } else {
+        this.#controller.handle(port, message);
+      }
     });
     view.onDidDispose(() => {
-      this.#view = undefined;
+      this.#controller.detach(port);
     });
     const uri = (file: string): string =>
       webview.asWebviewUri(vscode.Uri.joinPath(this.#mediaUri, file)).toString();
     webview.html = renderChatHtml(webview.cspSource, uri('chat.css'), uri('chat.js'));
   }
-
-  /**
-   * Submits a message as if it had been typed into the panel, and resolves
-   * with how it ended. The panel must be open.
-   */
-  async submit(text: string): Promise<ChatOutcome> {
-    const view = this.#view;
-    if (view === undefined) {
-      throw new Error('the chat panel is not open');
-    }
-    await this.#ready;
-    const outcome = new Promise<ChatOutcome>((resolve) => {
-      this.#waiting.push(resolve);
-    });
-    await view.webview.postMessage({ type: 'submit', text });
-    return outcome;
-  }
-
-  #handle(webview: vscode.Webview, message: unknown): void {
-    if (isMessage(message, 'cancel')) {
-      this.#chat.cancel();
-      return;
-    }
-    // The panel is not trusted: only a well-formed request is acted on.
-    if (!isMessage(message, 'send') || typeof message.text !== 'string') {
-      return;
-    }
-    const text = message.text.trim();
-    if (text === '' || this.#busy) {
-      return;
-    }
-    this.#busy = true;
-    void this.#send(webview, text).finally(() => {
-      this.#busy = false;
-    });
-  }
-
-  async #send(webview: vscode.Webview, text: string): Promise<void> {
-    let reply = '';
-    let outcome: ChatOutcome;
-    try {
-      const stopReason = await this.#chat.send(text, (piece) => {
-        reply += piece;
-        void webview.postMessage({ type: 'text', text: piece });
-      });
-      outcome = { text: reply, stopReason };
-      void webview.postMessage({ type: 'end', stopReason });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'The request failed.';
-      outcome = { error: message };
-      void webview.postMessage({ type: 'error', message });
-    }
-    for (const resolve of this.#waiting.splice(0)) {
-      resolve(outcome);
-    }
-  }
-}
-
-function isMessage(value: unknown, type: string): value is { type: string; text?: unknown } {
-  return typeof value === 'object' && value !== null && (value as { type?: unknown }).type === type;
 }
 
 function renderChatHtml(cspSource: string, styleUri: string, scriptUri: string): string {

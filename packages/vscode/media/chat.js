@@ -3,6 +3,9 @@
 //
 // Everything a model writes is put on the page with textContent, so it is
 // always shown as plain text and never interpreted as markup.
+//
+// Each message the user sends gets a number. Every answer from the extension
+// names that number, and an answer for any other number is ignored.
 (function () {
   const vscode = acquireVsCodeApi();
   const messages = document.getElementById('messages');
@@ -18,9 +21,9 @@
     refusal: 'The model declined this request.',
   };
 
-  let busy = false;
-  /** The element the reply that is being written goes into. */
-  let reply = null;
+  let nextId = 1;
+  /** The request that is being answered: its number and the element its reply goes into. */
+  let current = null;
 
   function add(kind, text) {
     const element = document.createElement('div');
@@ -31,51 +34,55 @@
     return element;
   }
 
-  function setBusy(value) {
-    busy = value;
-    status.hidden = !value;
-    stopButton.hidden = !value;
-    sendButton.hidden = value;
-    updateSendButton();
-  }
-
-  function updateSendButton() {
+  function updateControls() {
+    const busy = current !== null;
+    status.hidden = !busy;
+    stopButton.hidden = !busy;
+    sendButton.hidden = busy;
     sendButton.disabled = busy || input.value.trim() === '';
   }
 
-  function submit(text) {
+  /** Sends a message. Returns false when it cannot be sent right now. */
+  function submit(text, token) {
     const trimmed = text.trim();
-    if (busy || trimmed === '') {
-      return;
+    if (current !== null || trimmed === '') {
+      return false;
     }
     welcome.hidden = true;
     add('user', trimmed);
-    reply = add('assistant', '');
-    setBusy(true);
-    vscode.postMessage({ type: 'send', text: trimmed });
+    current = { id: nextId, reply: add('assistant', '') };
+    nextId += 1;
+    updateControls();
+    vscode.postMessage({ type: 'send', id: current.id, text: trimmed, token });
+    return true;
   }
 
   function finish(note, kind) {
-    if (reply !== null && reply.textContent === '') {
+    const { id, reply } = current;
+    const shown = reply.textContent;
+    if (shown === '') {
       reply.remove();
     }
-    reply = null;
+    current = null;
     if (note !== undefined) {
       add(kind, note);
     }
-    setBusy(false);
+    updateControls();
     input.focus();
+    // Tells the extension what this page displayed for the request.
+    vscode.postMessage({ type: 'shown', id, text: kind === 'error' ? note : shown });
   }
 
   sendButton.addEventListener('click', () => {
-    submit(input.value);
-    input.value = '';
-    updateSendButton();
+    if (submit(input.value)) {
+      input.value = '';
+      updateControls();
+    }
   });
   stopButton.addEventListener('click', () => {
     vscode.postMessage({ type: 'cancel' });
   });
-  input.addEventListener('input', updateSendButton);
+  input.addEventListener('input', updateControls);
   input.addEventListener('keydown', (event) => {
     // Enter sends. Shift and Enter starts a new line.
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
@@ -86,18 +93,25 @@
 
   window.addEventListener('message', (event) => {
     const message = event.data;
-    if (message.type === 'text' && reply !== null) {
-      reply.textContent += message.text;
+    if (message.type === 'submit') {
+      if (!submit(message.text, message.token)) {
+        vscode.postMessage({ type: 'rejected', token: message.token });
+      }
+      return;
+    }
+    if (current === null || message.id !== current.id) {
+      return;
+    }
+    if (message.type === 'text') {
+      current.reply.textContent += message.text;
       messages.scrollTop = messages.scrollHeight;
     } else if (message.type === 'end') {
       finish(NOTE_BY_STOP_REASON[message.stopReason], 'note');
     } else if (message.type === 'error') {
       finish(message.message, 'error');
-    } else if (message.type === 'submit') {
-      submit(message.text);
     }
   });
 
-  updateSendButton();
+  updateControls();
   vscode.postMessage({ type: 'ready' });
 })();

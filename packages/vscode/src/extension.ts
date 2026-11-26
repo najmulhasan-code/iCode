@@ -1,7 +1,8 @@
 import type { ModelProvider, StopReason } from '@icode/protocol';
 import * as vscode from 'vscode';
 import { ChatSession } from './chatSession';
-import { type ChatOutcome, ChatViewProvider } from './chatView';
+import { ChatPanelController, type SubmitResult } from './chatPanel';
+import { ChatViewProvider } from './chatView';
 import { CoreProcess } from './coreProcess';
 import { readModelSettings, secretName } from './settings';
 
@@ -10,7 +11,7 @@ export interface TestApi {
   setApiKey(provider: ModelProvider, apiKey: string): Promise<void>;
   sendMessage(text: string): Promise<{ readonly text: string; readonly stopReason: StopReason }>;
   /** Submits a message through the open chat panel, as if it had been typed there. */
-  submitInChatView(text: string): Promise<ChatOutcome>;
+  submitInChatView(text: string): Promise<SubmitResult>;
 }
 
 async function setApiKey(secrets: vscode.SecretStorage): Promise<void> {
@@ -49,9 +50,14 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
     },
     onNotification: (notification) => routes.chat?.handleNotification(notification),
   });
-  const session = new ChatSession(core, context.secrets);
+  const session = new ChatSession({
+    core,
+    readSettings: readModelSettings,
+    readKey: (provider) => context.secrets.get(secretName(provider)),
+  });
   routes.chat = session;
-  const chatView = new ChatViewProvider(context.extensionUri, session);
+  const panel = new ChatPanelController(session);
+  const chatView = new ChatViewProvider(context.extensionUri, panel);
 
   context.subscriptions.push(
     log,
@@ -82,6 +88,6 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
       });
       return { text: reply, stopReason };
     },
-    submitInChatView: (text) => chatView.submit(text),
+    submitInChatView: (text) => panel.submit(text),
   };
 }

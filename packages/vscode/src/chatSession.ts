@@ -7,6 +7,7 @@ import {
   type ChatSendParams,
   type ChatSendResult,
   CoreErrorCode,
+  type ModelProvider,
   type NotificationMessage,
   type RequestId,
   RpcError,
@@ -14,9 +15,8 @@ import {
   type SetModelParams,
   type StopReason,
 } from '@icode/protocol';
-import type * as vscode from 'vscode';
-import type { CoreProcess, CoreSession } from './coreProcess';
-import { readModelSettings, secretName } from './settings';
+import type { CoreSession } from './coreProcess';
+import type { ModelSettings } from './settings';
 
 /** A failure with a message written for the person using the editor. */
 export class ChatError extends Error {
@@ -24,6 +24,16 @@ export class ChatError extends Error {
     super(message);
     this.name = 'ChatError';
   }
+}
+
+/** What a chat session needs from the editor. Passed in, so the session can be tested alone. */
+export interface ChatSessionDependencies {
+  /** Returns the running core, starting it when needed. */
+  readonly core: { session(): Promise<CoreSession> };
+  /** Reads the model the user has chosen. */
+  readonly readSettings: () => ModelSettings;
+  /** Reads the saved API key of a provider, if there is one. */
+  readonly readKey: (provider: ModelProvider) => PromiseLike<string | undefined>;
 }
 
 const MESSAGE_BY_FAILURE_KIND: ReadonlyMap<string, string> = new Map([
@@ -55,19 +65,18 @@ function toChatError(error: unknown): ChatError {
 /**
  * Sends chat messages to the core and passes the pieces of each reply on. It
  * tells the core which model to use whenever the settings, the key or the
- * core process have changed.
+ * core process have changed. One reply is written at a time.
  */
 export class ChatSession {
-  readonly #core: CoreProcess;
-  readonly #secrets: vscode.SecretStorage;
+  readonly #dependencies: ChatSessionDependencies;
   readonly #listeners = new Map<RequestId, (text: string) => void>();
   #applied: { readonly generation: number; readonly fingerprint: string } | undefined;
   #active: { readonly session: CoreSession; readonly id: RequestId } | undefined;
   #sending = false;
+  #cancelRequested = false;
 
-  constructor(core: CoreProcess, secrets: vscode.SecretStorage) {
-    this.#core = core;
-    this.#secrets = secrets;
+  constructor(dependencies: ChatSessionDependencies) {
+    this.#dependencies = dependencies;
   }
 
   /** Routes a notification from the core to the request it belongs to. */
@@ -82,7 +91,9 @@ export class ChatSession {
   }
 
   /**
-   * Sends one message and resolves when the reply has ended.
+   * Sends one message and resolves when the reply has ended. A send that is
+   * cancelled before the message has left resolves with `cancelled`, and
+   * nothing is sent.
    *
    * @throws ChatError with a message for the person using the editor.
    */
@@ -93,15 +104,23 @@ export class ChatSession {
       throw new ChatError('A reply is still being written. Wait for it or stop it first.');
     }
     this.#sending = true;
+    this.#cancelRequested = false;
     try {
-      const settings = readModelSettings();
-      const apiKey = await this.#secrets.get(secretName(settings.provider));
+      const { core, readSettings, readKey } = this.#dependencies;
+      const settings = readSettings();
+      const apiKey = await readKey(settings.provider);
       if (apiKey === undefined || apiKey === '') {
         throw new ChatError(
           `No API key is set for the provider "${settings.provider}". Run "iCode: Set API Key".`,
         );
       }
-      const session = await this.#core.session();
+      if (this.#wasCancelled()) {
+        return 'cancelled';
+      }
+      const session = await core.session();
+      if (this.#wasCancelled()) {
+        return 'cancelled';
+      }
       const params: SetModelParams = { ...settings, apiKey };
       const fingerprint = JSON.stringify(params);
       if (
@@ -110,6 +129,9 @@ export class ChatSession {
       ) {
         await session.connection.request(SET_MODEL_METHOD, params);
         this.#applied = { generation: session.generation, fingerprint };
+      }
+      if (this.#wasCancelled()) {
+        return 'cancelled';
       }
 
       const chat: ChatSendParams = { text };
@@ -130,8 +152,23 @@ export class ChatSession {
     }
   }
 
-  /** Asks the core to stop the reply that is being written, if there is one. */
+  /**
+   * Whether a stop was asked for. It is read through a method because the
+   * flag changes while `send` is waiting, which the type checker cannot see.
+   */
+  #wasCancelled(): boolean {
+    return this.#cancelRequested;
+  }
+
+  /**
+   * Stops the reply that is being written. It also works before the message
+   * has left, while the key is read or the core is starting.
+   */
   cancel(): void {
+    if (!this.#sending) {
+      return;
+    }
+    this.#cancelRequested = true;
     if (this.#active !== undefined) {
       const params: CancelParams = { id: this.#active.id };
       this.#active.session.connection.notify(CANCEL_METHOD, params);
