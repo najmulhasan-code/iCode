@@ -5,6 +5,9 @@
       "path": "packages/protocol"
     },
     {
+      "path": "packages/core"
+    },
+    {
       "path": "packages/vscode"
     },
     {
