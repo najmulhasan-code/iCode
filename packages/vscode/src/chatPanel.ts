@@ -54,6 +54,8 @@ export type PanelMessage =
 /** One open page of the chat panel. */
 export interface PanelPort {
   post(message: PanelMessage): void;
+  /** Loads the page again, for a page that stopped answering. */
+  reload?(): void;
 }
 
 /** The part of a chat session the panel uses. */
@@ -78,17 +80,25 @@ export interface ChatSummary {
   readonly lost: boolean;
 }
 
-/** What starting a new chat did. `empty`: the shown chat was empty, so nothing changed. */
-export type NewChatResult = 'started' | 'empty' | 'closed';
+/** What starting a new chat did. `empty`: the current chat was empty, so nothing changed. */
+export type NewChatResult = 'started' | 'empty';
 
 /** What opening a chat from the list did. */
-export type OpenResult = 'opened' | 'current' | 'gone' | 'closed';
+export type OpenResult = 'opened' | 'current' | 'gone';
+
+/** How long a page has to confirm a switch before it is loaded again. */
+const CONFIRM_TIMEOUT_MS = 10_000;
 
 /** Everything the extension keeps about one chat. */
 interface ChatRecord {
   readonly key: number;
   readonly entries: ChatEntry[];
   draft: string;
+  /**
+   * Text of messages that were not sent, by request number, kept until the
+   * page reports that it put the text back into the composer.
+   */
+  readonly returns: Map<number, string>;
   /** The core's conversation, while the chat is not the current one. */
   conversation: ConversationRef | undefined;
   lastUsed: number;
@@ -100,6 +110,7 @@ interface PendingShow {
   readonly seq: number;
   readonly record: ChatRecord;
   readonly carry: boolean;
+  readonly timer: ReturnType<typeof setTimeout>;
   readonly resolve: () => void;
 }
 
@@ -110,6 +121,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Text taken back from a request goes before what the composer already holds. */
 function joinDraft(text: string, draft: string): string {
   return draft === '' ? text : `${text}\n${draft}`;
+}
+
+/** The unsent text of a chat, with the text of messages not yet given back to the page. */
+function fullDraft(record: ChatRecord): string {
+  let draft = record.draft;
+  for (const text of record.returns.values()) {
+    draft = joinDraft(text, draft);
+  }
+  return draft;
+}
+
+/** Keeps the text of returned messages in the draft itself. */
+function foldReturns(record: ChatRecord): void {
+  record.draft = fullDraft(record);
+  record.returns.clear();
+}
+
+/** The page reports its unsent text, and which returned messages that text now holds. */
+function applyDraft(record: ChatRecord, text: string, returned: unknown): void {
+  record.draft = text;
+  if (Array.isArray(returned)) {
+    for (const id of returned) {
+      if (typeof id === 'number') {
+        record.returns.delete(id);
+      }
+    }
+  }
 }
 
 /**
@@ -127,7 +165,12 @@ function joinDraft(text: string, draft: string): string {
  * The confirmation carries the final unsent text of the chat the page left.
  * Messages from one page arrive in the order it sent them, so nothing older
  * about that chat can arrive later. Each message the page sends names the
- * chat it was sent in, and one that names any other chat is refused.
+ * chat it was sent in, and one that names any other chat is refused. A page
+ * that does not confirm in time is loaded again. Chats can also be switched
+ * while no page is open, and the next page shows the current one.
+ *
+ * Typed text is never lost. A message that is not sent stays in the record
+ * of its chat until the page reports the text back in its composer.
  *
  * The page is not trusted. Only a well-formed request is acted on, and all a
  * page can ask for is to send a message, to stop the reply, and to keep the
@@ -136,6 +179,7 @@ function joinDraft(text: string, draft: string): string {
 export class ChatPanelController {
   readonly #chat: ChatBackend;
   readonly #now: () => number;
+  readonly #confirmTimeout: number;
   #port: PanelPort | undefined;
   #active: { readonly port: PanelPort; readonly id: number } | undefined;
   /** Settles when the running request has ended and been recorded. */
@@ -157,10 +201,19 @@ export class ChatPanelController {
   #switches: Promise<unknown> = Promise.resolve();
   #switching = 0;
 
-  constructor(chat: ChatBackend, now: () => number = Date.now) {
+  constructor(
+    chat: ChatBackend,
+    options: { readonly now?: () => number; readonly confirmTimeout?: number } = {},
+  ) {
     this.#chat = chat;
-    this.#now = now;
+    this.#now = options.now ?? Date.now;
+    this.#confirmTimeout = options.confirmTimeout ?? CONFIRM_TIMEOUT_MS;
     this.#current = this.#create();
+  }
+
+  /** Whether a page of the panel is open. */
+  get isOpen(): boolean {
+    return this.#port !== undefined;
   }
 
   /**
@@ -190,8 +243,15 @@ export class ChatPanelController {
     this.#port = undefined;
     this.#pageKey = undefined;
     // A switch waiting for this page goes on without it.
-    this.#pending?.resolve();
-    this.#pending = undefined;
+    if (this.#pending !== undefined) {
+      clearTimeout(this.#pending.timer);
+      this.#pending.resolve();
+      this.#pending = undefined;
+    }
+    // No page can give back any text now, so the records keep it.
+    for (const record of this.#records.values()) {
+      foldReturns(record);
+    }
     this.#outcomes.clear();
     this.#tokenByRequest.clear();
     for (const resolve of this.#waiting.values()) {
@@ -231,21 +291,22 @@ export class ChatPanelController {
   newChat(): Promise<NewChatResult> {
     return this.#serialize(async (): Promise<NewChatResult> => {
       const port = this.#port;
-      if (port === undefined) {
-        return 'closed';
-      }
       if (this.#current.entries.length === 0) {
-        port.post({ type: 'focus' });
+        port?.post({ type: 'focus' });
         return 'empty';
       }
       await this.#stopActive();
       const previous = this.#current;
       previous.conversation = await this.#chat.setAside();
       this.#current = this.#create();
-      if (this.#port !== port) {
-        return 'closed';
+      if (port !== undefined && this.#port === port) {
+        await this.#show(port, this.#current, previous.lost);
+      } else if (previous.lost) {
+        // No page carries the text over, so the records do.
+        this.#current.draft = fullDraft(previous);
+        previous.draft = '';
+        previous.returns.clear();
       }
-      await this.#show(port, this.#current, previous.lost);
       return 'started';
     });
   }
@@ -254,15 +315,12 @@ export class ChatPanelController {
   open(key: number): Promise<OpenResult> {
     return this.#serialize(async (): Promise<OpenResult> => {
       const port = this.#port;
-      if (port === undefined) {
-        return 'closed';
-      }
       const target = this.#records.get(key);
       if (target === undefined) {
         return 'gone';
       }
       if (target === this.#current) {
-        port.post({ type: 'focus' });
+        port?.post({ type: 'focus' });
         return 'current';
       }
       await this.#stopActive();
@@ -279,10 +337,10 @@ export class ChatPanelController {
       target.conversation = undefined;
       target.lastUsed = this.#now();
       this.#current = target;
-      if (this.#port !== port) {
-        return 'closed';
+      // Without the page that asked, the next page shows this chat.
+      if (port !== undefined && this.#port === port) {
+        await this.#show(port, target, false);
       }
-      await this.#show(port, target, false);
       return 'opened';
     });
   }
@@ -291,14 +349,14 @@ export class ChatPanelController {
   chats(): ChatSummary[] {
     return (
       [...this.#records.values()]
-        .filter((record) => record.entries.length > 0 || record.draft.trim() !== '')
+        .filter((record) => record.entries.length > 0 || fullDraft(record).trim() !== '')
         // Of two chats used at the same moment, the one begun later comes first.
         .sort((a, b) => b.lastUsed - a.lastUsed || b.key - a.key)
         .map((record) => {
           const first = record.entries.find((entry) => entry.kind === 'user');
           return {
             key: record.key,
-            text: first?.text ?? record.draft,
+            text: first?.text ?? fullDraft(record),
             lastUsed: record.lastUsed,
             current: record === this.#current,
             notSent: record.entries.length === 0,
@@ -335,6 +393,7 @@ export class ChatPanelController {
       key: this.#nextKey,
       entries: [],
       draft: '',
+      returns: new Map(),
       conversation: undefined,
       lastUsed: this.#now(),
       lost: false,
@@ -344,12 +403,24 @@ export class ChatPanelController {
     return record;
   }
 
-  /** Tells the page to show a chat, and resolves once it has, or has closed. */
+  /**
+   * Tells the page to show a chat, and resolves once it has, or has closed.
+   * A page that does not confirm in time is loaded again, and the switch goes
+   * on without it.
+   */
   #show(port: PanelPort, record: ChatRecord, carry: boolean): Promise<void> {
     const seq = this.#nextSeq;
     this.#nextSeq += 1;
+    // The page is given the whole text, so from now on the page holds it.
+    foldReturns(record);
     return new Promise((resolve) => {
-      this.#pending = { seq, record, carry, resolve };
+      const timer = setTimeout(() => {
+        if (this.#pending?.seq === seq && this.#port === port) {
+          this.detach(port);
+          port.reload?.();
+        }
+      }, this.#confirmTimeout);
+      this.#pending = { seq, record, carry, timer, resolve };
       port.post({
         type: 'show',
         seq,
@@ -368,6 +439,7 @@ export class ChatPanelController {
       return;
     }
     this.#pending = undefined;
+    clearTimeout(pending.timer);
     const { left } = message;
     const leftRecord = this.#pageKey === undefined ? undefined : this.#records.get(this.#pageKey);
     if (
@@ -376,17 +448,18 @@ export class ChatPanelController {
       left.key === leftRecord.key &&
       typeof left.draft === 'string'
     ) {
+      applyDraft(leftRecord, left.draft, left.returned);
       if (pending.carry) {
+        // The page kept its composer text for the new chat.
+        pending.record.draft = fullDraft(leftRecord);
         leftRecord.draft = '';
-        pending.record.draft = left.draft;
-      } else {
-        leftRecord.draft = left.draft;
+        leftRecord.returns.clear();
       }
       // A chat left with nothing in it is not kept.
       if (
         leftRecord !== this.#current &&
         leftRecord.entries.length === 0 &&
-        leftRecord.draft === ''
+        fullDraft(leftRecord) === ''
       ) {
         this.#records.delete(leftRecord.key);
       }
@@ -397,11 +470,11 @@ export class ChatPanelController {
 
   /** The page reports the unsent text of the chat it shows. */
   #handleDraft(message: Record<string, unknown>): void {
-    const { chat, text } = message;
+    const { chat, text, returned } = message;
     if (typeof chat === 'number' && chat === this.#pageKey && typeof text === 'string') {
       const record = this.#records.get(chat);
       if (record !== undefined) {
-        record.draft = text;
+        applyDraft(record, text, returned);
       }
     }
   }
@@ -432,20 +505,30 @@ export class ChatPanelController {
   }
 
   #handleSend(port: PanelPort, message: Record<string, unknown>): void {
-    const { id, text, token, chat } = message;
+    const { id, text, token, chat, draft } = message;
     if (typeof id !== 'number' || typeof text !== 'string') {
       return;
     }
     if (typeof token === 'number') {
       this.#tokenByRequest.set(id, token);
     }
+    const trimmed = text.trim();
+    // A send also says what the composer holds after it.
+    const shown =
+      typeof chat === 'number' && chat === this.#pageKey ? this.#records.get(chat) : undefined;
+    if (shown !== undefined && typeof draft === 'string') {
+      shown.draft = draft;
+    }
     // Every request gets an answer, so the page can never wait forever. A
-    // refused message was not sent, so the page puts it back into the composer.
+    // refused message was not sent, so the page puts it back into the
+    // composer, and the record keeps it until the page says it has.
     const refuse = (reason: string): void => {
+      if (shown !== undefined && trimmed !== '') {
+        shown.returns.set(id, trimmed);
+      }
       this.#outcomes.set(id, { error: reason });
       port.post({ type: 'error', id, message: reason, withdraw: true });
     };
-    const trimmed = text.trim();
     if (trimmed === '') {
       refuse('The message is empty.');
     } else if (this.#active !== undefined) {
@@ -492,7 +575,9 @@ export class ChatPanelController {
         record.lost = true;
         record.entries.pop();
         record.entries.push({ kind: 'error', text: message });
-        if (this.#port !== port) {
+        if (this.#port === port) {
+          record.returns.set(id, text);
+        } else {
           record.draft = joinDraft(text, record.draft);
         }
       } else {

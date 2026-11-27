@@ -53,8 +53,10 @@ async function focusPanel(): Promise<void> {
   await vscode.commands.executeCommand('icode.chat.focus');
 }
 
+/** Starts a new chat. With the panel closed, the panel opens and shows it. */
 async function newChat(panel: ChatPanelController): Promise<void> {
-  if ((await panel.newChat()) === 'closed') {
+  await panel.newChat();
+  if (!panel.isOpen) {
     await focusPanel();
   }
 }
@@ -78,11 +80,10 @@ async function showChatHistory(panel: ChatPanelController): Promise<void> {
   if (picked === undefined) {
     return;
   }
-  const result = await panel.open(picked.key);
-  if (result === 'closed') {
-    await focusPanel();
-  } else if (result === 'gone') {
+  if ((await panel.open(picked.key)) === 'gone') {
     void vscode.window.showWarningMessage('That chat is no longer available.');
+  } else if (!panel.isOpen) {
+    await focusPanel();
   }
 }
 

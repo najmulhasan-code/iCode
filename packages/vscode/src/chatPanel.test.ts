@@ -69,17 +69,34 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 /**
  * A page as the controller sees it. Like the real page, it confirms each
- * `show` with the unsent text of the chat it leaves, and it keeps the text in
- * its composer. A held page receives `show` messages but confirms them only
- * when the test delivers them, as a page that is behind would.
+ * `show` with the unsent text of the chat it leaves, keeps the text in its
+ * composer, and puts a message that was not sent back into the composer,
+ * saying which one it put back. A held page receives `show` messages but
+ * acts on them only when the test delivers them, as a page that is behind
+ * would. A deaf page ignores answers to its messages, as a page that closes
+ * before it reads them does.
  */
-function page(controller: ChatPanelController, options: { held?: boolean } = {}) {
+function page(controller: ChatPanelController, options: { held?: boolean; deaf?: boolean } = {}) {
   /** Every message except `show`. */
   const posted: PanelMessage[] = [];
   /** The `show` messages the page has acted on. */
   const shows: ShowMessage[] = [];
   const queue: ShowMessage[] = [];
-  const state = { key: undefined as number | undefined, draft: '' };
+  const state = {
+    key: undefined as number | undefined,
+    draft: '',
+    /** The message waiting for its answer. */
+    waiting: undefined as { id: number; text: string } | undefined,
+    returned: [] as number[],
+  };
+  const takeBack = (): void => {
+    if (state.waiting !== undefined) {
+      const { id, text } = state.waiting;
+      state.waiting = undefined;
+      state.draft = state.draft === '' ? text : `${text}\n${state.draft}`;
+      state.returned.push(id);
+    }
+  };
   const port = {
     posted,
     shows,
@@ -90,12 +107,23 @@ function page(controller: ChatPanelController, options: { held?: boolean } = {})
       return state.draft;
     },
     post: (message: PanelMessage) => {
-      if (message.type !== 'show') {
-        posted.push(message);
-      } else if (options.held === true) {
-        queue.push(message);
-      } else {
-        confirm(message);
+      if (message.type === 'show') {
+        if (options.held === true) {
+          queue.push(message);
+        } else {
+          confirm(message);
+        }
+        return;
+      }
+      posted.push(message);
+      if (options.deaf === true || !('id' in message) || message.id !== state.waiting?.id) {
+        return;
+      }
+      if (message.type === 'error' && message.withdraw === true) {
+        takeBack();
+        port.type(state.draft);
+      } else if (message.type === 'end' || message.type === 'error') {
+        state.waiting = undefined;
       }
     },
     /** Acts on the `show` messages that were held back, in order. */
@@ -107,15 +135,22 @@ function page(controller: ChatPanelController, options: { held?: boolean } = {})
     /** Types into the composer, which reports the text. */
     type: (text: string) => {
       state.draft = text;
-      controller.handle(port, { type: 'draft', chat: state.key, text });
+      const returned = state.returned.splice(0);
+      controller.handle(port, { type: 'draft', chat: state.key, text, returned });
     },
     /** Sends a message from the composer, in the chat the page shows. */
     send: (id: number, text: string) => {
-      controller.handle(port, { type: 'send', chat: state.key, id, text });
+      state.waiting = { id, text: text.trim() };
+      state.draft = '';
+      controller.handle(port, { type: 'send', chat: state.key, id, text, draft: '' });
     },
   };
   function confirm(message: ShowMessage): void {
-    const left = state.key === undefined ? null : { key: state.key, draft: state.draft };
+    takeBack();
+    const left =
+      state.key === undefined
+        ? null
+        : { key: state.key, draft: state.draft, returned: state.returned.splice(0) };
     controller.handle(port, { type: 'switched', seq: message.seq, left });
     state.key = message.key;
     if (!message.carry) {
@@ -129,7 +164,7 @@ function page(controller: ChatPanelController, options: { held?: boolean } = {})
 async function setup() {
   const chat = fakeChat();
   const clock = { now: 1_000_000 };
-  const controller = new ChatPanelController(chat.backend, () => clock.now);
+  const controller = new ChatPanelController(chat.backend, { now: () => clock.now });
   const port = page(controller);
   controller.attach(port);
   await settle();
@@ -498,10 +533,20 @@ describe('a new chat', () => {
     expect(sends.at(-1)?.text).toBe('after the switch');
   });
 
-  it('does nothing without an open page', async () => {
-    const controller = new ChatPanelController(fakeChat().backend);
+  it('starts without an open page, and the next page shows the new chat', async () => {
+    const context = await setup();
+    const { controller, port } = context;
+    await exchange(context, 1, 'topic A');
+    controller.detach(port);
 
-    await expect(controller.newChat()).resolves.toBe('closed');
+    await expect(controller.newChat()).resolves.toBe('started');
+    const second = page(controller);
+    controller.attach(second);
+    await settle();
+    expect(second.shows[0]).toMatchObject({ entries: [], draft: '' });
+    expect(second.key).not.toBe(port.key);
+    second.send(2, 'new topic');
+    expect(context.sends.at(-1)?.conversation).toBe('c2');
   });
 });
 
@@ -601,12 +646,31 @@ describe('the chat list', () => {
     expect(port.posted.at(-1)).toEqual({ type: 'focus' });
   });
 
-  it('says so for a chat it does not know, or when no page is open', async () => {
+  it('says so for a chat it does not know', async () => {
     const { controller } = await setup();
-    await expect(controller.open(99)).resolves.toBe('gone');
 
-    const closed = new ChatPanelController(fakeChat().backend);
-    await expect(closed.open(1)).resolves.toBe('closed');
+    await expect(controller.open(99)).resolves.toBe('gone');
+  });
+
+  it('opens a chat without an open page, and the next page shows it', async () => {
+    const context = await setup();
+    const { controller, port } = context;
+    await exchange(context, 1, 'topic A', 'About A.');
+    const a = port.key ?? 0;
+    await controller.newChat();
+    await exchange(context, 2, 'topic B');
+    controller.detach(port);
+
+    await expect(controller.open(a)).resolves.toBe('opened');
+    const second = page(controller);
+    controller.attach(second);
+    await settle();
+    expect(second.shows[0]).toMatchObject({
+      key: a,
+      entries: [{ text: 'topic A' }, { text: 'About A.' }],
+    });
+    second.send(3, 'more on A');
+    expect(context.sends.at(-1)?.conversation).toBe('c1');
   });
 });
 
@@ -703,7 +767,7 @@ describe('switches while the page is behind', () => {
     const second = page(controller);
     controller.attach(second);
     release();
-    await expect(opening).resolves.toBe('closed');
+    await expect(opening).resolves.toBe('opened');
     await settle();
 
     expect(second.shows).toHaveLength(1);
@@ -757,7 +821,7 @@ describe("a chat that iCode's engine has lost", () => {
   it('carries the unsent text into a new chat, which the model can continue', async () => {
     const { controller, port, sends } = await lostChat();
     // The page put the refused message back into the composer.
-    port.type('and then?');
+    expect(port.draft).toBe('and then?');
 
     await expect(controller.newChat()).resolves.toBe('started');
     expect(port.shows.at(-1)).toMatchObject({ carry: true });
@@ -793,5 +857,93 @@ describe("a chat that iCode's engine has lost", () => {
     controller.attach(second);
     await settle();
     expect(second.draft).toBe('and then?');
+  });
+});
+
+describe('text of a message that was not sent', () => {
+  it('is kept when the page closes before it could put the text back', async () => {
+    const context = await setup();
+    const { controller, state } = context;
+    const deaf = page(controller, { deaf: true });
+    controller.attach(deaf);
+    await settle();
+    deaf.send(1, 'topic A');
+    context.sends[0]?.end('end');
+    await settle();
+    state.lost.add('c1');
+    deaf.send(2, 'and then?');
+    await settle();
+    controller.detach(deaf);
+
+    const second = page(controller);
+    controller.attach(second);
+    await settle();
+    expect(second.draft).toBe('and then?');
+  });
+
+  it('is kept when a refused message is answered after the page closed', async () => {
+    const context = await setup();
+    const { controller } = context;
+    const deaf = page(controller, { deaf: true });
+    controller.attach(deaf);
+    await settle();
+    deaf.send(1, 'first');
+    deaf.send(2, 'second, too soon');
+    controller.detach(deaf);
+    context.sends[0]?.end('cancelled');
+    await settle();
+
+    const second = page(controller);
+    controller.attach(second);
+    await settle();
+    expect(second.draft).toBe('second, too soon');
+  });
+
+  it('is kept once, not twice, when the page put it back', async () => {
+    const context = await setup();
+    const { controller, port } = context;
+    port.send(1, 'first');
+    port.send(2, 'second, too soon');
+    expect(port.draft).toBe('second, too soon');
+    port.type('second, too soon, and more');
+    context.sends[0]?.end('end');
+    await settle();
+    controller.detach(port);
+
+    const second = page(controller);
+    controller.attach(second);
+    await settle();
+    expect(second.draft).toBe('second, too soon, and more');
+  });
+});
+
+describe('a page that does not confirm a switch', () => {
+  it('is loaded again after a while, and the switch goes on without it', async () => {
+    const chat = fakeChat();
+    const controller = new ChatPanelController(chat.backend, { confirmTimeout: 20 });
+    let reloads = 0;
+    const stuck = page(controller, { held: true });
+    const port = {
+      ...stuck,
+      post: stuck.post,
+      reload: () => {
+        reloads += 1;
+      },
+    };
+    controller.attach(port);
+    const started = controller.newChat();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(reloads).toBe(1);
+    expect(controller.isOpen).toBe(false);
+    await expect(started).resolves.toBe('empty');
+    // A confirmation that comes too late changes nothing.
+    stuck.deliver();
+    const fresh = page(controller);
+    controller.attach(fresh);
+    await settle();
+    expect(fresh.shows).toHaveLength(1);
+    fresh.send(1, 'hello');
+    expect(chat.sends[0]?.text).toBe('hello');
   });
 });

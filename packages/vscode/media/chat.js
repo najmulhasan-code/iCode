@@ -35,6 +35,8 @@
   let current = null;
   /** The key of the chat shown, as the extension last said. Null until then. */
   let chatKey = null;
+  /** Numbers of messages put back into the composer since the last report. */
+  let returned = [];
 
   function add(kind, text) {
     const element = document.createElement('div');
@@ -53,15 +55,22 @@
     sendButton.disabled = busy || chatKey === null || input.value.trim() === '';
   }
 
-  /** Tells the extension the unsent text of the chat shown. */
+  /**
+   * Tells the extension the unsent text of the chat shown, and which messages
+   * put back into the composer that text now holds.
+   */
   function reportDraft() {
     if (chatKey !== null) {
-      vscode.postMessage({ type: 'draft', chat: chatKey, text: input.value });
+      vscode.postMessage({ type: 'draft', chat: chatKey, text: input.value, returned });
+      returned = [];
     }
   }
 
-  /** Sends a message. Returns false when it cannot be sent right now. */
-  function submit(text, token) {
+  /**
+   * Sends a message. Returns false when it cannot be sent right now. A message
+   * typed into the composer empties it, and the send says so.
+   */
+  function submit(text, token, fromComposer) {
     const trimmed = text.trim();
     if (current !== null || chatKey === null || trimmed === '') {
       return false;
@@ -71,7 +80,15 @@
     current = { id: nextId, text: trimmed, user, reply: add('assistant', ''), token };
     nextId += 1;
     updateControls();
-    vscode.postMessage({ type: 'send', id: current.id, chat: chatKey, text: trimmed, token });
+    const draft = fromComposer ? '' : input.value;
+    vscode.postMessage({
+      type: 'send',
+      id: current.id,
+      chat: chatKey,
+      text: trimmed,
+      draft,
+      token,
+    });
     return true;
   }
 
@@ -96,8 +113,9 @@
    * back into the composer, before what the composer already holds.
    */
   function withdraw() {
-    const { text, user, reply } = current;
+    const { id, text, user, reply } = current;
     current = null;
+    returned.push(id);
     user.remove();
     reply.remove();
     input.value = input.value === '' ? text : `${text}\n${input.value}`;
@@ -147,7 +165,8 @@
   function show(message) {
     withdrawPending();
     // The final unsent text of the chat this page leaves.
-    const left = chatKey === null ? null : { key: chatKey, draft: input.value };
+    const left = chatKey === null ? null : { key: chatKey, draft: input.value, returned };
+    returned = [];
     vscode.postMessage({ type: 'switched', seq: message.seq, left });
     chatKey = message.key;
     draw(message.entries);
@@ -159,10 +178,9 @@
   }
 
   sendButton.addEventListener('click', () => {
-    if (submit(input.value)) {
+    if (submit(input.value, undefined, true)) {
       input.value = '';
       updateControls();
-      reportDraft();
     }
   });
   stopButton.addEventListener('click', () => {

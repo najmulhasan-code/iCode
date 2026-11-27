@@ -34,10 +34,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       enableScripts: true,
       localResourceRoots: [this.#mediaUri],
     };
+    const uri = (file: string): string =>
+      webview.asWebviewUri(vscode.Uri.joinPath(this.#mediaUri, file)).toString();
+    const load = (): void => {
+      webview.html = renderChatHtml(webview.cspSource, uri('chat.css'), uri('chat.js'));
+    };
     const port: PanelPort = {
       post: (message) => {
         void webview.postMessage(message);
       },
+      // A page that stopped answering is replaced. It says when it is ready.
+      reload: load,
     };
     webview.onDidReceiveMessage((message: unknown) => {
       // The page says when its script is running. Until then it cannot receive anything.
@@ -50,9 +57,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     view.onDidDispose(() => {
       this.#controller.detach(port);
     });
-    const uri = (file: string): string =>
-      webview.asWebviewUri(vscode.Uri.joinPath(this.#mediaUri, file)).toString();
-    webview.html = renderChatHtml(webview.cspSource, uri('chat.css'), uri('chat.js'));
+    load();
   }
 }
 

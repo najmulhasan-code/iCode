@@ -148,7 +148,8 @@ describe('the panel script', () => {
     exchange(page, 'hello', 'Hi.');
     show(page, 2);
 
-    expect(page.send('again')).toMatchObject({ type: 'send', chat: 2, text: 'again' });
+    // The send also says that the composer is empty now.
+    expect(page.send('again')).toMatchObject({ type: 'send', chat: 2, text: 'again', draft: '' });
   });
 
   it('draws a chat from its entries, with the notes and errors in place', () => {
@@ -181,12 +182,12 @@ describe('the panel script', () => {
     expect(show(page, 1)).toEqual({ type: 'switched', seq, left: null });
     page.input.value = 'draft A';
     page.input.dispatch('input');
-    expect(page.posted.at(-1)).toEqual({ type: 'draft', chat: 1, text: 'draft A' });
+    expect(page.posted.at(-1)).toEqual({ type: 'draft', chat: 1, text: 'draft A', returned: [] });
 
     expect(show(page, 2, [], 'draft B')).toEqual({
       type: 'switched',
       seq,
-      left: { key: 1, draft: 'draft A' },
+      left: { key: 1, draft: 'draft A', returned: [] },
     });
     expect(page.input.value).toBe('draft B');
     expect(page.shown()).toEqual([]);
@@ -206,10 +207,12 @@ describe('the panel script', () => {
     const page = openPage();
     show(page, 1);
     exchange(page, 'first', 'One.');
-    page.send('late');
+    const late = page.send('late');
     page.input.value = 'more';
 
-    expect(show(page, 2)).toMatchObject({ left: { key: 1, draft: 'late\nmore' } });
+    expect(show(page, 2)).toMatchObject({
+      left: { key: 1, draft: 'late\nmore', returned: [late.id] },
+    });
     expect(page.shown()).toEqual([]);
   });
 
@@ -221,7 +224,7 @@ describe('the panel script', () => {
 
     expect(page.input.value).toBe('hello');
     expect(page.shown()).toEqual(['The chat is being switched.']);
-    expect(page.posted).toContainEqual({ type: 'draft', chat: 1, text: 'hello' });
+    expect(page.posted).toContainEqual({ type: 'draft', chat: 1, text: 'hello', returned: [id] });
     expect(page.posted.at(-1)).toEqual({ type: 'shown', id, text: 'The chat is being switched.' });
   });
 
