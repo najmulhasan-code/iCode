@@ -45,6 +45,14 @@ describe('a reply in the panel', () => {
     expect(html).not.toContain('data-streamdown="code-block-copy-button"');
   });
 
+  it('shows code blocks and tables in full, with no height limit of their own', () => {
+    const html = render('```ts\nconst x = 1;\n```\n\n| A | B |\n| - | - |\n| 1 | 2 |');
+
+    expect(html).toContain('data-streamdown="code-block-body"');
+    expect(html).toContain('data-streamdown="table"');
+    expect(html).not.toMatch(/max-height:\s*\d/);
+  });
+
   it('shows raw HTML as text, never as elements', () => {
     const html = render('Before <script>alert(1)</script> <b onclick="x()">bold</b> after');
 
