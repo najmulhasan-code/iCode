@@ -186,6 +186,9 @@ export function Markdown({ text, streaming, onOpenLink, onCopy }: MarkdownProps)
       shikiTheme={SHIKI_THEMES}
       // Line numbers cost width a side panel does not have.
       lineNumbers={false}
+      // Code and tables show in full: the panel scrolls, not boxes inside it.
+      codeBlockMaxHeight={0}
+      tableMaxHeight={0}
     >
       {text}
     </Streamdown>
