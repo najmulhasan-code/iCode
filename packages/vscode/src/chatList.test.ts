@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chatDescription, chatTitle, timeAgo } from './chatList';
+import { chatDescription, chatListItems, chatTitle, timeAgo } from './chatList';
 import type { ChatSummary } from './chatPanel';
 
 function chat(fields: Partial<ChatSummary>): ChatSummary {
@@ -31,10 +31,6 @@ describe('chatTitle', () => {
   it('keeps text of exactly 60 characters whole', () => {
     expect(chatTitle(chat({ text: 'b'.repeat(60) }))).toBe('b'.repeat(60));
   });
-
-  it('shows an icon name as typed, not as an icon', () => {
-    expect(chatTitle(chat({ text: 'what is $(alert)?' }))).toBe('what is $​(alert)?');
-  });
 });
 
 describe('timeAgo', () => {
@@ -51,6 +47,20 @@ describe('timeAgo', () => {
     [3 * 24 * 60 * minute, '3 days ago'],
   ])('says %i milliseconds ago is "%s"', (elapsed, words) => {
     expect(timeAgo(1_000_000_000 - elapsed, 1_000_000_000)).toBe(words);
+  });
+});
+
+describe('chatListItems', () => {
+  it('gives each chat its key, name and description, in the order given', () => {
+    expect(
+      chatListItems(
+        [chat({ key: 2, text: 'second', current: true }), chat({ key: 1, text: 'first' })],
+        60_000,
+      ),
+    ).toEqual([
+      { key: 2, title: 'second', description: 'current' },
+      { key: 1, title: 'first', description: '1 minute ago' },
+    ]);
   });
 });
 

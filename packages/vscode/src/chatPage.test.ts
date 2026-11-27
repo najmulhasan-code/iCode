@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
  * The script runs unchanged against these, so its own logic is what is tested.
  */
 class FakeElement {
+  id = '';
   className = '';
   hidden = false;
   disabled = false;
@@ -18,6 +19,19 @@ class FakeElement {
   #parent: FakeElement | undefined;
   readonly #children: FakeElement[] = [];
   readonly #listeners = new Map<string, ((event: unknown) => void)[]>();
+  readonly #attributes = new Map<string, string>();
+
+  setAttribute(name: string, value: string): void {
+    this.#attributes.set(name, value);
+  }
+
+  removeAttribute(name: string): void {
+    this.#attributes.delete(name);
+  }
+
+  getAttribute(name: string): string | null {
+    return this.#attributes.get(name) ?? null;
+  }
 
   get children(): FakeElement[] {
     return [...this.#children];
@@ -61,7 +75,20 @@ const SCRIPT = readFileSync(join(__dirname, '..', 'media', 'chat.js'), 'utf8');
 /** Runs the panel script on a fake page and returns ways to act on it. */
 function openPage() {
   const elements = new Map<string, FakeElement>();
-  for (const id of ['messages', 'welcome', 'status', 'input', 'send', 'stop']) {
+  for (const id of [
+    'messages',
+    'welcome',
+    'status',
+    'input',
+    'send',
+    'stop',
+    'chat',
+    'history',
+    'history-back',
+    'history-search',
+    'history-list',
+    'history-empty',
+  ]) {
     elements.set(id, new FakeElement());
   }
   const element = (id: string): FakeElement => {
@@ -72,6 +99,8 @@ function openPage() {
     return found;
   };
   element('messages').append(element('welcome'));
+  // As on the real page, the chat list starts hidden.
+  element('history').hidden = true;
   const posted: Record<string, unknown>[] = [];
   const window = new FakeElement();
   runInNewContext(SCRIPT, {
@@ -108,6 +137,20 @@ function openPage() {
         .children.filter((child) => child !== element('welcome'))
         .map((child) => child.textContent),
     welcomeShown: () => !element('welcome').hidden,
+    element,
+    /** Presses a key on an element. */
+    press: (id: string, key: string) => {
+      element(id).dispatch('keydown', { key, preventDefault: () => undefined });
+    },
+    /** Whether the chat list is shown in place of the chat. */
+    historyShown: () => !element('history').hidden && element('chat').hidden,
+    /** Each row of the chat list: its name, its description, and whether it is highlighted. */
+    rows: () =>
+      element('history-list').children.map((row) => ({
+        title: row.children[0]?.textContent,
+        description: row.children[1]?.textContent,
+        highlighted: row.getAttribute('aria-selected') === 'true',
+      })),
   };
 }
 
@@ -236,5 +279,96 @@ describe('the panel script', () => {
     show(page, 2);
 
     expect(page.posted).toContainEqual({ type: 'rejected', token: 5 });
+  });
+});
+
+describe('the chat list in the panel', () => {
+  const ITEMS = [
+    { key: 3, title: 'fix the failing test', description: 'current' },
+    { key: 2, title: 'explain the parser', description: '5 minutes ago' },
+    { key: 1, title: 'fix the build', description: '1 hour ago' },
+  ];
+
+  function withList() {
+    const page = openPage();
+    show(page, 3);
+    page.receive({ type: 'history', items: ITEMS });
+    return page;
+  }
+
+  it('takes the place of the chat, newest first, with the first row highlighted', () => {
+    const page = withList();
+
+    expect(page.historyShown()).toBe(true);
+    expect(page.rows()).toEqual([
+      { title: 'fix the failing test', description: 'current', highlighted: true },
+      { title: 'explain the parser', description: '5 minutes ago', highlighted: false },
+      { title: 'fix the build', description: '1 hour ago', highlighted: false },
+    ]);
+    expect(page.element('history-search').getAttribute('aria-activedescendant')).toBe(
+      'history-item-3',
+    );
+  });
+
+  it('keeps only the chats whose name holds the search text', () => {
+    const page = withList();
+    const search = page.element('history-search');
+    search.value = 'FIX';
+    search.dispatch('input');
+
+    expect(page.rows().map((row) => row.title)).toEqual(['fix the failing test', 'fix the build']);
+
+    search.value = 'nothing like this';
+    search.dispatch('input');
+    expect(page.rows()).toEqual([]);
+    expect(page.element('history-empty').hidden).toBe(false);
+    expect(page.element('history-empty').textContent).toBe('No chats match.');
+  });
+
+  it('says so when there are no chats yet', () => {
+    const page = openPage();
+    show(page, 1);
+    page.receive({ type: 'history', items: [] });
+
+    expect(page.element('history-empty').textContent).toBe('No chats yet.');
+  });
+
+  it('opens the highlighted chat with the arrow keys and Enter, and goes back to the chat', () => {
+    const page = withList();
+    page.press('history-search', 'ArrowDown');
+    page.press('history-search', 'ArrowDown');
+    page.press('history-search', 'ArrowDown');
+    page.press('history-search', 'ArrowUp');
+    expect(page.rows().map((row) => row.highlighted)).toEqual([false, false, true]);
+
+    page.press('history-search', 'Enter');
+    expect(page.posted.at(-1)).toEqual({ type: 'open', key: 1 });
+    expect(page.historyShown()).toBe(false);
+  });
+
+  it('opens a chat that is clicked', () => {
+    const page = withList();
+    page.element('history-list').children[1]?.click();
+
+    expect(page.posted.at(-1)).toEqual({ type: 'open', key: 2 });
+    expect(page.historyShown()).toBe(false);
+  });
+
+  it('closes with Escape or the back button, and opens nothing', () => {
+    const page = withList();
+    page.press('history', 'Escape');
+    expect(page.historyShown()).toBe(false);
+
+    page.receive({ type: 'history', items: ITEMS });
+    page.element('history-back').click();
+    expect(page.historyShown()).toBe(false);
+    expect(page.posted.some((message) => message.type === 'open')).toBe(false);
+  });
+
+  it('closes when the extension switches the chat', () => {
+    const page = withList();
+    show(page, 2);
+
+    expect(page.historyShown()).toBe(false);
   });
 });

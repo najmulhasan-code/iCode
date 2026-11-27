@@ -1,7 +1,6 @@
 import type { ModelProvider, StopReason } from '@icode/protocol';
 import * as vscode from 'vscode';
 import { ChatSession } from './chatSession';
-import { chatDescription, chatTitle } from './chatList';
 import {
   ChatPanelController,
   type ChatSummary,
@@ -61,28 +60,10 @@ async function newChat(panel: ChatPanelController): Promise<void> {
   }
 }
 
-/** Lists the chats of this window and opens the one picked. */
+/** Shows the chat list in the panel, opening the panel when it is closed. */
 async function showChatHistory(panel: ChatPanelController): Promise<void> {
-  const chats = panel.chats();
-  if (chats.length === 0) {
-    void vscode.window.showInformationMessage('There are no chats yet.');
-    return;
-  }
-  const now = Date.now();
-  const picked = await vscode.window.showQuickPick(
-    chats.map((chat) => ({
-      label: chatTitle(chat),
-      description: chatDescription(chat, now),
-      key: chat.key,
-    })),
-    { title: 'Chat History', placeHolder: 'Pick a chat to open' },
-  );
-  if (picked === undefined) {
-    return;
-  }
-  if ((await panel.open(picked.key)) === 'gone') {
-    void vscode.window.showWarningMessage('That chat is no longer available.');
-  } else if (!panel.isOpen) {
+  panel.showHistory();
+  if (!panel.isOpen) {
     await focusPanel();
   }
 }

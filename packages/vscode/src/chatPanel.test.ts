@@ -947,3 +947,58 @@ describe('a page that does not confirm a switch', () => {
     expect(chat.sends[0]?.text).toBe('hello');
   });
 });
+
+describe('the chat list in the panel', () => {
+  it('is sent to the page with each chat named and described', async () => {
+    const context = await setup();
+    const { controller, port, clock } = context;
+    await exchange(context, 1, 'topic A');
+    clock.now += 120_000;
+    await controller.newChat();
+    port.type('half a thought');
+
+    controller.showHistory();
+    expect(port.posted.at(-1)).toEqual({
+      type: 'history',
+      items: [
+        { key: port.key, title: 'half a thought', description: 'current, not sent' },
+        { key: (port.key ?? 0) - 1, title: 'topic A', description: '2 minutes ago' },
+      ],
+    });
+  });
+
+  it('asked for with the panel closed, is shown once the next page shows its chat', async () => {
+    const context = await setup();
+    const { controller, port } = context;
+    await exchange(context, 1, 'topic A');
+    controller.detach(port);
+    controller.showHistory();
+
+    const second = page(controller);
+    controller.attach(second);
+    await settle();
+    expect(second.shows).toHaveLength(1);
+    expect(second.posted).toEqual([
+      { type: 'history', items: [{ key: port.key, title: 'topic A', description: 'current' }] },
+    ]);
+  });
+
+  it('opens the chat the page picks, and ignores a chat it does not know', async () => {
+    const context = await setup();
+    const { controller, port } = context;
+    await exchange(context, 1, 'topic A');
+    const a = port.key;
+    await controller.newChat();
+    await exchange(context, 2, 'topic B');
+
+    controller.handle(port, { type: 'open', key: 99 });
+    controller.handle(port, { type: 'open', key: 'not a key' });
+    await settle();
+    expect(port.shows).toHaveLength(2);
+
+    controller.handle(port, { type: 'open', key: a });
+    await settle();
+    expect(port.key).toBe(a);
+    expect(port.shows).toHaveLength(3);
+  });
+});

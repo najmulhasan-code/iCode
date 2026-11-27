@@ -3,15 +3,17 @@ import type { ChatSummary } from './chatPanel';
 /** The longest name a chat gets in the list, in characters. */
 const TITLE_LENGTH = 60;
 
-/**
- * The name of a chat in the list: its text on one line, cut to a length that
- * fits. The editor would draw `$(name)` in a list item as an icon, so a zero
- * width space is put between its two characters to show it as typed.
- */
+/** One row of the chat list in the panel. */
+export interface ChatListItem {
+  readonly key: number;
+  readonly title: string;
+  readonly description: string;
+}
+
+/** The name of a chat in the list: its text on one line, cut to a length that fits. */
 export function chatTitle(chat: ChatSummary): string {
   const line = chat.text.replace(/\s+/g, ' ').trim();
-  const cut = line.length > TITLE_LENGTH ? `${line.slice(0, TITLE_LENGTH - 1).trimEnd()}…` : line;
-  return cut.replace(/\$\(/g, '$​(');
+  return line.length > TITLE_LENGTH ? `${line.slice(0, TITLE_LENGTH - 1).trimEnd()}…` : line;
 }
 
 function plural(count: number, unit: string): string {
@@ -34,7 +36,7 @@ export function timeAgo(then: number, now: number): string {
   return plural(Math.floor(hours / 24), 'day');
 }
 
-/** The words shown next to a chat's name: when it was used, and what state it is in. */
+/** The words shown under a chat's name: when it was used, and what state it is in. */
 export function chatDescription(chat: ChatSummary, now: number): string {
   const parts = [chat.current ? 'current' : timeAgo(chat.lastUsed, now)];
   if (chat.notSent) {
@@ -44,4 +46,13 @@ export function chatDescription(chat: ChatSummary, now: number): string {
     parts.push('cannot be continued');
   }
   return parts.join(', ');
+}
+
+/** The rows of the chat list, in the order given. */
+export function chatListItems(chats: readonly ChatSummary[], now: number): ChatListItem[] {
+  return chats.map((chat) => ({
+    key: chat.key,
+    title: chatTitle(chat),
+    description: chatDescription(chat, now),
+  }));
 }

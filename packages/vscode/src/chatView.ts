@@ -75,23 +75,35 @@ function renderChatHtml(cspSource: string, styleUri: string, scriptUri: string):
     <title>iCode</title>
   </head>
   <body>
-    <main id="messages" class="messages" aria-label="Conversation" aria-live="polite">
-      <div id="welcome" class="welcome moving">
+    <div id="chat" class="chat">
+      <main id="messages" class="messages" aria-label="Conversation" aria-live="polite">
+        <div id="welcome" class="welcome moving">
+          ${MARK}
+          <p>Describe a task</p>
+        </div>
+      </main>
+      <div id="status" class="status moving" hidden>
         ${MARK}
-        <p>Describe a task</p>
+        <span>Working</span>
       </div>
-    </main>
-    <div id="status" class="status moving" hidden>
-      ${MARK}
-      <span>Working</span>
-    </div>
-    <div class="composer">
-      <textarea id="input" aria-label="Message" placeholder="Describe a task" rows="3"></textarea>
-      <div class="actions">
-        <button id="stop" type="button" class="secondary" hidden>Stop</button>
-        <button id="send" type="button" disabled>Send</button>
+      <div class="composer">
+        <textarea id="input" aria-label="Message" placeholder="Describe a task" rows="3"></textarea>
+        <div class="actions">
+          <button id="stop" type="button" class="secondary" hidden>Stop</button>
+          <button id="send" type="button" disabled>Send</button>
+        </div>
       </div>
     </div>
+    <section id="history" class="history" aria-label="Chat history" hidden>
+      <div class="history-bar">
+        <button id="history-back" type="button" class="icon" aria-label="Back to the chat" title="Back to the chat">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 3 5.5 8l5 5" /></svg>
+        </button>
+        <input id="history-search" type="text" role="combobox" aria-label="Search chats" aria-controls="history-list" aria-expanded="true" aria-autocomplete="list" placeholder="Search chats" autocomplete="off" spellcheck="false" />
+      </div>
+      <ul id="history-list" class="history-list" role="listbox" aria-label="Chats"></ul>
+      <p id="history-empty" class="history-empty" hidden></p>
+    </section>
     <script nonce="${nonce}" src="${scriptUri}"></script>
   </body>
 </html>`;

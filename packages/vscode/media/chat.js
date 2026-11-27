@@ -20,6 +20,12 @@
   const input = document.getElementById('input');
   const sendButton = document.getElementById('send');
   const stopButton = document.getElementById('stop');
+  const chatView = document.getElementById('chat');
+  const historyView = document.getElementById('history');
+  const historyBack = document.getElementById('history-back');
+  const historySearch = document.getElementById('history-search');
+  const historyList = document.getElementById('history-list');
+  const historyEmpty = document.getElementById('history-empty');
 
   const NOTE_BY_STOP_REASON = {
     cancelled: 'Stopped.',
@@ -177,6 +183,103 @@
     input.focus();
   }
 
+  // The chat list takes the place of the chat until a chat is picked or the
+  // list is closed. Typing in the search box filters it. The arrow keys move
+  // the highlight, Enter opens the highlighted chat, and Escape goes back.
+  /** All rows of the list, and the rows that match the search. */
+  let historyItems = [];
+  let matching = [];
+  let highlighted = -1;
+
+  function highlight(index) {
+    highlighted = index;
+    Array.from(historyList.children).forEach((row, position) => {
+      row.className = position === index ? 'history-item highlighted' : 'history-item';
+      row.setAttribute('aria-selected', position === index ? 'true' : 'false');
+      if (position === index && typeof row.scrollIntoView === 'function') {
+        row.scrollIntoView({ block: 'nearest' });
+      }
+    });
+    if (index >= 0) {
+      historySearch.setAttribute('aria-activedescendant', `history-item-${matching[index].key}`);
+    } else {
+      historySearch.removeAttribute('aria-activedescendant');
+    }
+  }
+
+  function drawHistory() {
+    const query = historySearch.value.trim().toLowerCase();
+    matching = historyItems.filter((item) => item.title.toLowerCase().includes(query));
+    for (const row of Array.from(historyList.children)) {
+      row.remove();
+    }
+    for (const item of matching) {
+      const row = document.createElement('li');
+      row.id = `history-item-${item.key}`;
+      row.setAttribute('role', 'option');
+      const title = document.createElement('span');
+      title.className = 'history-title';
+      title.textContent = item.title;
+      const description = document.createElement('span');
+      description.className = 'history-description';
+      description.textContent = item.description;
+      row.append(title);
+      row.append(description);
+      row.addEventListener('click', () => {
+        pick(item.key);
+      });
+      historyList.append(row);
+    }
+    historyEmpty.textContent = historyItems.length === 0 ? 'No chats yet.' : 'No chats match.';
+    historyEmpty.hidden = matching.length > 0;
+    highlight(matching.length > 0 ? 0 : -1);
+  }
+
+  function openHistory(items) {
+    historyItems = items;
+    historySearch.value = '';
+    chatView.hidden = true;
+    historyView.hidden = false;
+    drawHistory();
+    historySearch.focus();
+  }
+
+  function closeHistory() {
+    if (historyView.hidden) {
+      return;
+    }
+    historyView.hidden = true;
+    chatView.hidden = false;
+    input.focus();
+  }
+
+  function pick(key) {
+    closeHistory();
+    vscode.postMessage({ type: 'open', key });
+  }
+
+  historyBack.addEventListener('click', closeHistory);
+  historySearch.addEventListener('input', drawHistory);
+  historySearch.addEventListener('keydown', (event) => {
+    const count = matching.length;
+    if (event.key === 'ArrowDown' && count > 0) {
+      event.preventDefault();
+      highlight((highlighted + 1) % count);
+    } else if (event.key === 'ArrowUp' && count > 0) {
+      event.preventDefault();
+      highlight((highlighted - 1 + count) % count);
+    } else if (event.key === 'Enter' && highlighted >= 0) {
+      event.preventDefault();
+      pick(matching[highlighted].key);
+    }
+  });
+  historyView.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeHistory();
+    }
+  });
+
   sendButton.addEventListener('click', () => {
     if (submit(input.value, undefined, true)) {
       input.value = '';
@@ -207,7 +310,13 @@
       return;
     }
     if (message.type === 'show') {
+      // A switch always ends on the chat itself.
+      closeHistory();
       show(message);
+      return;
+    }
+    if (message.type === 'history') {
+      openHistory(message.items);
       return;
     }
     if (message.type === 'focus') {

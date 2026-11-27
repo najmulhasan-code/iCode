@@ -1,4 +1,5 @@
 import type { StopReason } from '@icode/protocol';
+import { type ChatListItem, chatListItems } from './chatList';
 import { ConversationLostError, type ConversationRef } from './chatSession';
 
 /** How one message sent from the panel ended. */
@@ -48,6 +49,8 @@ export type PanelMessage =
       readonly draft: string;
       readonly carry: boolean;
     }
+  /** Show the chat list in the panel, in place of the chat. */
+  | { readonly type: 'history'; readonly items: readonly ChatListItem[] }
   /** Move the cursor to the composer. */
   | { readonly type: 'focus' };
 
@@ -173,8 +176,8 @@ function applyDraft(record: ChatRecord, text: string, returned: unknown): void {
  * of its chat until the page reports the text back in its composer.
  *
  * The page is not trusted. Only a well-formed request is acted on, and all a
- * page can ask for is to send a message, to stop the reply, and to keep the
- * unsent text of the chat it shows.
+ * page can ask for is to send a message, to stop the reply, to keep the
+ * unsent text of the chat it shows, and to open a chat from the list.
  */
 export class ChatPanelController {
   readonly #chat: ChatBackend;
@@ -200,6 +203,8 @@ export class ChatPanelController {
   /** Switches run one after another. While one runs, no message is sent. */
   #switches: Promise<unknown> = Promise.resolve();
   #switching = 0;
+  /** The chat list was asked for while no page was open. */
+  #historyWanted = false;
 
   constructor(
     chat: ChatBackend,
@@ -228,6 +233,10 @@ export class ChatPanelController {
       await this.#activeDone;
       if (this.#port === port) {
         await this.#show(port, this.#current, false);
+      }
+      if (this.#port === port && this.#historyWanted) {
+        this.#historyWanted = false;
+        this.#postHistory(port);
       }
     }).catch(() => undefined);
   }
@@ -275,6 +284,9 @@ export class ChatPanelController {
       this.#handleDraft(message);
     } else if (message.type === 'switched') {
       this.#handleSwitched(message);
+    } else if (message.type === 'open' && typeof message.key === 'number') {
+      // A chat picked from the list. An unknown chat changes nothing.
+      void this.open(message.key).catch(() => undefined);
     } else if (message.type === 'shown') {
       this.#handleShown(message);
     } else if (message.type === 'rejected' && typeof message.token === 'number') {
@@ -343,6 +355,22 @@ export class ChatPanelController {
       }
       return 'opened';
     });
+  }
+
+  /**
+   * Shows the chat list in the panel. With no page open, the next page shows
+   * it once it has shown the current chat.
+   */
+  showHistory(): void {
+    if (this.#port === undefined) {
+      this.#historyWanted = true;
+    } else {
+      this.#postHistory(this.#port);
+    }
+  }
+
+  #postHistory(port: PanelPort): void {
+    port.post({ type: 'history', items: chatListItems(this.chats(), this.#now()) });
   }
 
   /** The chats of this window that hold anything, the most recently used first. */
