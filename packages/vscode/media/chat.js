@@ -6,6 +6,12 @@
 //
 // Each message the user sends gets a number. Every answer from the extension
 // names that number, and an answer for any other number is ignored.
+//
+// A conversation put aside by "New Chat" keeps its elements and the unsent
+// text of the composer here, under a key the extension chose, so that it can
+// be shown again exactly as it was. Every message sent names the key of the
+// conversation shown, so the extension can refuse one sent just before a
+// switch reached this page.
 (function () {
   const vscode = acquireVsCodeApi();
   const messages = document.getElementById('messages');
@@ -22,8 +28,15 @@
   };
 
   let nextId = 1;
-  /** The request that is being answered: its number and the element its reply goes into. */
+  /**
+   * The request that is being answered: its number, its text, the elements
+   * of the message and of its reply, and the test token it came with.
+   */
   let current = null;
+  /** The key of the conversation shown, as the extension last said. */
+  let chatKey = null;
+  /** Conversations put aside, by key: their elements and the composer text. */
+  const aside = new Map();
 
   function add(kind, text) {
     const element = document.createElement('div');
@@ -49,11 +62,11 @@
       return false;
     }
     welcome.hidden = true;
-    add('user', trimmed);
-    current = { id: nextId, reply: add('assistant', '') };
+    const user = add('user', trimmed);
+    current = { id: nextId, text: trimmed, user, reply: add('assistant', ''), token };
     nextId += 1;
     updateControls();
-    vscode.postMessage({ type: 'send', id: current.id, text: trimmed, token });
+    vscode.postMessage({ type: 'send', id: current.id, chat: chatKey, text: trimmed, token });
     return true;
   }
 
@@ -71,6 +84,77 @@
     input.focus();
     // Tells the extension what this page displayed for the request.
     vscode.postMessage({ type: 'shown', id, text: kind === 'error' ? note : shown });
+  }
+
+  /**
+   * The extension switches only once its last reply has ended, so a request
+   * still waiting here was sent after the switch began and will be refused.
+   * Its message is taken back into the composer, so nothing typed is lost.
+   */
+  function withdrawPending() {
+    if (current === null) {
+      return;
+    }
+    const { text, user, reply, token } = current;
+    current = null;
+    user.remove();
+    reply.remove();
+    input.value = input.value === '' ? text : `${text}\n${input.value}`;
+    if (token !== undefined) {
+      vscode.postMessage({ type: 'rejected', token });
+    }
+  }
+
+  /** Takes the shown conversation off the page and returns it. */
+  function takeShown() {
+    const elements = Array.from(messages.children).filter((element) => element !== welcome);
+    for (const element of elements) {
+      element.remove();
+    }
+    const shown = { elements, draft: input.value };
+    input.value = '';
+    return shown;
+  }
+
+  function show(conversation) {
+    for (const element of conversation.elements) {
+      messages.append(element);
+    }
+    welcome.hidden = conversation.elements.length > 0;
+    if (conversation.draft !== '') {
+      input.value = conversation.draft;
+    }
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  /** Puts the shown conversation aside. One with nothing in it is not kept. */
+  function putAside(stashKey) {
+    const shown = takeShown();
+    if (shown.elements.length === 0 && shown.draft === '') {
+      vscode.postMessage({ type: 'dropped', key: stashKey });
+    } else {
+      aside.set(stashKey, shown);
+    }
+  }
+
+  function newChat(stashKey, key) {
+    withdrawPending();
+    putAside(stashKey);
+    chatKey = key;
+    welcome.hidden = false;
+    updateControls();
+    input.focus();
+  }
+
+  function openChat(key, stashKey) {
+    withdrawPending();
+    const conversation = aside.get(key);
+    aside.delete(key);
+    putAside(stashKey);
+    chatKey = key;
+    show(conversation ?? { elements: [], draft: '' });
+    updateControls();
+    input.focus();
   }
 
   sendButton.addEventListener('click', () => {
@@ -97,6 +181,22 @@
       if (!submit(message.text, message.token)) {
         vscode.postMessage({ type: 'rejected', token: message.token });
       }
+      return;
+    }
+    if (message.type === 'start') {
+      chatKey = message.key;
+      return;
+    }
+    if (message.type === 'newChat') {
+      newChat(message.stashKey, message.key);
+      return;
+    }
+    if (message.type === 'openChat') {
+      openChat(message.key, message.stashKey);
+      return;
+    }
+    if (message.type === 'focus') {
+      input.focus();
       return;
     }
     if (current === null || message.id !== current.id) {

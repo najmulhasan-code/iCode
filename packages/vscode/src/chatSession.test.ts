@@ -273,3 +273,94 @@ describe('ChatSession.cancel', () => {
     );
   });
 });
+
+describe('ChatSession.setAside and resume', () => {
+  it('sets the conversation aside, so the next message begins a new one', async () => {
+    const context = setup();
+    const { chat, fromCore, methods } = context;
+    const first = chat.send('hi', () => undefined);
+    fromCore({ id: await prepare(context), result: { stopReason: 'end' } });
+    await first;
+
+    expect(await chat.setAside()).toEqual({ generation: 1, id: 'c1' });
+    const second = chat.send('again', () => undefined);
+    fromCore({ id: await prepare(context), result: { stopReason: 'end' } });
+    await second;
+    expect(methods()).toEqual([
+      'model/set',
+      'conversation/create',
+      'chat/send',
+      'conversation/create',
+      'chat/send',
+    ]);
+  });
+
+  it('resolves with nothing when no conversation had begun', async () => {
+    const { chat, sent } = setup();
+
+    await expect(chat.setAside()).resolves.toBeUndefined();
+    expect(sent).toEqual([]);
+  });
+
+  it('stops a reply that is being written and waits until it has ended', async () => {
+    const context = setup();
+    const { chat, sent, fromCore } = context;
+    const reply = chat.send('hi', () => undefined);
+    const id = await prepare(context);
+    let setAside = false;
+    const aside = chat.setAside().then((value) => {
+      setAside = true;
+      return value;
+    });
+    await settle();
+
+    expect(sent.at(-1)).toEqual({ jsonrpc: '2.0', method: '$/cancel', params: { id } });
+    expect(setAside).toBe(false);
+    fromCore({ id, result: { stopReason: 'cancelled' } });
+    await expect(reply).resolves.toBe('cancelled');
+    await expect(aside).resolves.toEqual({ generation: 1, id: 'c1' });
+  });
+
+  it('resumes a conversation, and the next message goes to it', async () => {
+    const context = setup();
+    const { chat, sent, fromCore } = context;
+    const first = chat.send('hi', () => undefined);
+    fromCore({ id: await prepare(context), result: { stopReason: 'end' } });
+    await first;
+    const earlier = await chat.setAside();
+
+    await expect(chat.resume(earlier)).resolves.toBe(true);
+    const next = chat.send('back again', () => undefined);
+    await settle();
+    expect(sent.at(-1)).toMatchObject({
+      method: 'chat/send',
+      params: { conversationId: 'c1', text: 'back again' },
+    });
+    fromCore({ id: (sent.at(-1) as { id: number }).id, result: { stopReason: 'end' } });
+    await next;
+  });
+
+  it('does not resume a conversation of a core that has stopped since, and changes nothing', async () => {
+    const context = setup();
+    const { chat, state, fromCore } = context;
+    const first = chat.send('hi', () => undefined);
+    fromCore({ id: await prepare(context), result: { stopReason: 'end' } });
+    await first;
+    const earlier = await chat.setAside();
+    state.generation = 2;
+
+    await expect(chat.resume(earlier)).resolves.toBe(false);
+    // The next message begins a new conversation in the new core.
+    const next = chat.send('hi', () => undefined);
+    fromCore({ id: await prepare(context), result: { stopReason: 'end' } });
+    await next;
+    expect(context.methods().slice(-3)).toEqual(['model/set', 'conversation/create', 'chat/send']);
+  });
+
+  it('resumes "no conversation yet" without starting the core', async () => {
+    const { chat, sent } = setup({ holdCore: true });
+
+    await expect(chat.resume(undefined)).resolves.toBe(true);
+    expect(sent).toEqual([]);
+  });
+});

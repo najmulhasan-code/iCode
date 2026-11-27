@@ -28,6 +28,12 @@ export class ChatError extends Error {
   }
 }
 
+/** A conversation in the core: the id the core gave it, and the core process that holds it. */
+export interface ConversationRef {
+  readonly generation: number;
+  readonly id: string;
+}
+
 /** What a chat session needs from the editor. Passed in, so the session can be tested alone. */
 export interface ChatSessionDependencies {
   /** Returns the running core, starting it when needed. */
@@ -77,9 +83,11 @@ export class ChatSession {
   readonly #dependencies: ChatSessionDependencies;
   readonly #listeners = new Map<RequestId, (text: string) => void>();
   #applied: { readonly generation: number; readonly fingerprint: string } | undefined;
-  #conversation: { readonly generation: number; readonly id: string } | undefined;
+  #conversation: ConversationRef | undefined;
   #active: { readonly session: CoreSession; readonly id: RequestId } | undefined;
   #sending = false;
+  /** Settles when the send that is running has ended. */
+  #sendDone: Promise<void> = Promise.resolve();
   #cancelRequested = false;
 
   constructor(dependencies: ChatSessionDependencies) {
@@ -112,6 +120,10 @@ export class ChatSession {
     }
     this.#sending = true;
     this.#cancelRequested = false;
+    let ended!: () => void;
+    this.#sendDone = new Promise((resolve) => {
+      ended = resolve;
+    });
     try {
       const { core, readSettings, readKey } = this.#dependencies;
       const settings = readSettings();
@@ -166,6 +178,55 @@ export class ChatSession {
       throw toChatError(error);
     } finally {
       this.#sending = false;
+      ended();
+    }
+  }
+
+  /**
+   * Stops the reply that is being written, waits until its send has ended,
+   * and sets the current conversation aside. The next message begins a new
+   * conversation. Resolves with the conversation that was set aside, or
+   * undefined when none had begun.
+   */
+  async setAside(): Promise<ConversationRef | undefined> {
+    await this.#settle();
+    const current = this.#conversation;
+    this.#conversation = undefined;
+    return current;
+  }
+
+  /**
+   * Makes a conversation that was set aside the current one again, after
+   * stopping any reply. Resolves false, and changes nothing, when the core
+   * that held the conversation has stopped since, because the conversation
+   * ended with it. Nothing is sent to the model.
+   */
+  async resume(conversation: ConversationRef | undefined): Promise<boolean> {
+    await this.#settle();
+    if (conversation !== undefined) {
+      let generation: number;
+      try {
+        generation = (await this.#dependencies.core.session()).generation;
+      } catch {
+        return false;
+      }
+      if (generation !== conversation.generation) {
+        return false;
+      }
+    }
+    if (this.#sending) {
+      throw new ChatError('A reply is still being written. Wait for it or stop it first.');
+    }
+    this.#conversation = conversation;
+    return true;
+  }
+
+  /** Stops the running send, if any, and waits until it has ended. */
+  async #settle(): Promise<void> {
+    this.cancel();
+    await this.#sendDone;
+    if (this.#sending) {
+      throw new ChatError('A reply is still being written. Wait for it or stop it first.');
     }
   }
 

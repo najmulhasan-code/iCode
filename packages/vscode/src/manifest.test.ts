@@ -7,6 +7,10 @@ interface Manifest {
     readonly configuration: {
       readonly properties: Readonly<Record<string, { readonly scope?: string }>>;
     };
+    readonly commands: readonly { readonly command: string; readonly icon?: string }[];
+    readonly menus: Readonly<
+      Record<string, readonly { readonly command: string; when?: string; group?: string }[]>
+    >;
   };
 }
 
@@ -30,5 +34,17 @@ describe('the extension manifest', () => {
     for (const [name, property] of Object.entries(manifest.contributes.configuration.properties)) {
       expect(property.scope, name).toBeDefined();
     }
+  });
+
+  it('shows New Chat as an icon in the title bar of the iCode view only', () => {
+    const command = manifest.contributes.commands.find(
+      (entry) => entry.command === 'icode.newChat',
+    );
+    expect(command?.icon).toBe('$(add)');
+    expect(manifest.contributes.menus['view/title']).toContainEqual({
+      command: 'icode.newChat',
+      when: 'view == icode.chat',
+      group: 'navigation',
+    });
   });
 });
