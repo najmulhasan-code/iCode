@@ -18,14 +18,16 @@ export type PanelMessage =
   | { readonly type: 'end'; readonly id: number; readonly stopReason: StopReason }
   | { readonly type: 'error'; readonly id: number; readonly message: string }
   | { readonly type: 'submit'; readonly text: string; readonly token: number }
-  /** Put the shown conversation aside under `stashKey` and show an empty one. */
-  | { readonly type: 'newChat'; readonly stashKey: number }
+  /** The key of the conversation the page shows, sent when the page opens. */
+  | { readonly type: 'start'; readonly key: number }
+  /** Put the shown conversation aside under `stashKey` and show an empty one, under `key`. */
+  | { readonly type: 'newChat'; readonly stashKey: number; readonly key: number }
   /**
-   * Show the conversation put aside under `key`. With `stashKey`, the shown
-   * conversation is put aside under it first. Without, the shown
-   * conversation is empty and is dropped.
+   * Put the shown conversation aside under `stashKey`, and show the one put
+   * aside under `key`. A page does not keep a conversation with nothing in
+   * it, and says so with a `dropped` message.
    */
-  | { readonly type: 'openChat'; readonly key: number; readonly stashKey?: number }
+  | { readonly type: 'openChat'; readonly key: number; readonly stashKey: number }
   /** Move the cursor to the composer. */
   | { readonly type: 'focus' };
 
@@ -68,6 +70,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * switched together, so what the model is sent always matches what the page
  * shows. A reopened conversation is only shown again: nothing in it runs again.
  *
+ * Each message from the page names the conversation it was sent in. One sent
+ * in a conversation that is no longer current is refused, because the page
+ * had not yet learned of a switch.
+ *
  * The page is not trusted. Only a well-formed request is acted on, and all a
  * page can ask for is to send a message or to stop the reply.
  */
@@ -105,6 +111,7 @@ export class ChatPanelController {
   attach(port: PanelPort): void {
     this.detach();
     this.#port = port;
+    port.post({ type: 'start', key: this.#current.key });
     if (this.#stale) {
       this.#stale = false;
       void this.#serialize(async () => {
@@ -128,8 +135,10 @@ export class ChatPanelController {
       resolve({ error: 'The chat panel was closed.' });
     }
     this.#waiting.clear();
-    // What a closed page showed is gone, so its conversations cannot be reopened.
-    if (this.#current.used) {
+    // What a closed page showed is gone, so its conversations cannot be
+    // reopened. A switch still running may yet select a conversation, so the
+    // next page begins a new one after it.
+    if (this.#current.used || this.#switching > 0) {
       this.#stale = true;
     }
     this.#aside.clear();
@@ -151,6 +160,8 @@ export class ChatPanelController {
       this.#handleShown(message);
     } else if (message.type === 'rejected' && typeof message.token === 'number') {
       this.#settle(message.token, { error: 'The chat panel did not accept the message.' });
+    } else if (message.type === 'dropped' && typeof message.key === 'number') {
+      this.#aside.delete(message.key);
     }
   }
 
@@ -177,15 +188,15 @@ export class ChatPanelController {
       const previous = this.#current.key;
       this.#aside.set(previous, conversation);
       this.#current = { key: this.#takeKey(), used: false };
-      port.post({ type: 'newChat', stashKey: previous });
+      port.post({ type: 'newChat', stashKey: previous, key: this.#current.key });
       return { kind: 'started', previous };
     });
   }
 
   /**
    * Reopens a conversation that was put aside: the one with this key, or the
-   * one put aside last. The shown conversation is put aside in its place,
-   * unless nothing was sent in it.
+   * one put aside last. The shown conversation is put aside in its place. If
+   * it holds nothing, not even unsent text, the page drops it.
    */
   reopen(key?: number): Promise<ReopenResult> {
     return this.#serialize(async (): Promise<ReopenResult> => {
@@ -213,12 +224,8 @@ export class ChatPanelController {
         return 'closed';
       }
       this.#aside.delete(target);
-      if (this.#current.used) {
-        this.#aside.set(this.#current.key, shown);
-        port.post({ type: 'openChat', key: target, stashKey: this.#current.key });
-      } else {
-        port.post({ type: 'openChat', key: target });
-      }
+      this.#aside.set(this.#current.key, shown);
+      port.post({ type: 'openChat', key: target, stashKey: this.#current.key });
       this.#current = { key: target, used: true };
       return 'reopened';
     });
@@ -276,7 +283,7 @@ export class ChatPanelController {
   }
 
   #handleSend(port: PanelPort, message: Record<string, unknown>): void {
-    const { id, text, token } = message;
+    const { id, text, token, chat } = message;
     if (typeof id !== 'number' || typeof text !== 'string') {
       return;
     }
@@ -295,6 +302,8 @@ export class ChatPanelController {
       refuse('A reply is still being written. Wait for it or stop it first.');
     } else if (this.#switching > 0) {
       refuse('The chat is being switched. Send the message again in a moment.');
+    } else if (chat !== this.#current.key) {
+      refuse('The chat was switched before this message arrived. Send it again.');
     } else {
       this.#current.used = true;
       this.#activeDone = this.#run(port, id, trimmed);
