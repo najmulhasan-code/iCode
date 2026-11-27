@@ -97,7 +97,10 @@ function openPage() {
       input.value = text;
       input.dispatch('input');
       element('send').click();
-      return posted.at(-1) as { id: number; chat: number };
+      return posted.filter((message) => message.type === 'send').at(-1) as {
+        id: number;
+        chat: number;
+      };
     },
     /** The text of each message shown, in order. */
     shown: () =>
@@ -108,6 +111,20 @@ function openPage() {
   };
 }
 
+/** Shows a chat on the page, as the extension does, and returns the page's confirmation. */
+let seq = 0;
+function show(
+  page: ReturnType<typeof openPage>,
+  key: number,
+  entries: unknown[] = [],
+  draft = '',
+  carry = false,
+) {
+  seq += 1;
+  page.receive({ type: 'show', seq, key, entries, draft, carry });
+  return page.posted.find((message) => message.type === 'switched' && message.seq === seq);
+}
+
 /** Sends a message and lets its reply end. */
 function exchange(page: ReturnType<typeof openPage>, text: string, reply: string): void {
   const { id } = page.send(text);
@@ -116,69 +133,104 @@ function exchange(page: ReturnType<typeof openPage>, text: string, reply: string
 }
 
 describe('the panel script', () => {
-  it('names the conversation it shows in every message it sends', () => {
+  it('sends nothing until it has been shown a chat', () => {
     const page = openPage();
-    page.receive({ type: 'start', key: 1 });
+    page.input.value = 'too early';
+    page.input.dispatch('input');
+    page.send('too early');
+
+    expect(page.posted.filter((message) => message.type === 'send')).toEqual([]);
+  });
+
+  it('names the chat it shows in every message it sends', () => {
+    const page = openPage();
+    show(page, 1);
     exchange(page, 'hello', 'Hi.');
-    page.receive({ type: 'newChat', stashKey: 1, key: 2 });
+    show(page, 2);
 
     expect(page.send('again')).toMatchObject({ type: 'send', chat: 2, text: 'again' });
   });
 
-  it('keeps the unsent text of both conversations across New Chat and Undo', () => {
+  it('draws a chat from its entries, with the notes and errors in place', () => {
     const page = openPage();
-    page.receive({ type: 'start', key: 1 });
-    exchange(page, 'hello', 'Hi.');
-    page.input.value = 'draft A';
-    page.receive({ type: 'newChat', stashKey: 1, key: 2 });
-    expect(page.input.value).toBe('');
-    expect(page.shown()).toEqual([]);
-    expect(page.welcomeShown()).toBe(true);
+    show(page, 1, [
+      { kind: 'user', text: 'one' },
+      { kind: 'reply', text: 'Partly', stopReason: 'cancelled' },
+      { kind: 'user', text: 'two' },
+      { kind: 'reply', text: '', stopReason: 'refusal' },
+      { kind: 'user', text: 'three' },
+      { kind: 'reply', text: 'Half' },
+      { kind: 'error', text: 'The provider could not be reached.' },
+    ]);
 
-    page.input.value = 'draft B';
-    page.receive({ type: 'openChat', key: 1, stashKey: 2 });
-    expect(page.input.value).toBe('draft A');
-    expect(page.shown()).toEqual(['hello', 'Hi.']);
+    expect(page.shown()).toEqual([
+      'one',
+      'Partly',
+      'Stopped.',
+      'two',
+      'The model declined this request.',
+      'three',
+      'Half',
+      'The provider could not be reached.',
+    ]);
     expect(page.welcomeShown()).toBe(false);
-    expect(page.posted.some((message) => message.type === 'dropped')).toBe(false);
+  });
 
-    page.receive({ type: 'openChat', key: 2, stashKey: 1 });
+  it('reports unsent text as it changes, and confirms each switch with the text it leaves', () => {
+    const page = openPage();
+    expect(show(page, 1)).toEqual({ type: 'switched', seq, left: null });
+    page.input.value = 'draft A';
+    page.input.dispatch('input');
+    expect(page.posted.at(-1)).toEqual({ type: 'draft', chat: 1, text: 'draft A' });
+
+    expect(show(page, 2, [], 'draft B')).toEqual({
+      type: 'switched',
+      seq,
+      left: { key: 1, draft: 'draft A' },
+    });
     expect(page.input.value).toBe('draft B');
     expect(page.shown()).toEqual([]);
+    expect(page.welcomeShown()).toBe(true);
   });
 
-  it('does not keep a conversation with nothing in it, and says so', () => {
+  it('keeps the composer text for the new chat when told to carry it', () => {
     const page = openPage();
-    page.receive({ type: 'start', key: 1 });
-    exchange(page, 'hello', 'Hi.');
-    page.receive({ type: 'newChat', stashKey: 1, key: 2 });
-    page.receive({ type: 'openChat', key: 1, stashKey: 2 });
+    show(page, 1, [{ kind: 'user', text: 'topic' }]);
+    page.input.value = 'carry me';
 
-    expect(page.posted.at(-1)).toEqual({ type: 'dropped', key: 2 });
-    expect(page.shown()).toEqual(['hello', 'Hi.']);
+    expect(show(page, 2, [], '', true)).toMatchObject({ left: { key: 1, draft: 'carry me' } });
+    expect(page.input.value).toBe('carry me');
   });
 
-  it('takes back a message sent just before a switch, into the composer of its conversation', () => {
+  it('takes back a message sent just before a switch, into the text it confirms for its chat', () => {
     const page = openPage();
-    page.receive({ type: 'start', key: 1 });
+    show(page, 1);
     exchange(page, 'first', 'One.');
-    const late = page.send('late');
-    page.receive({ type: 'newChat', stashKey: 1, key: 2 });
-    // The extension refuses the late message, and the page is already elsewhere.
-    page.receive({ type: 'error', id: late.id, message: 'The chat was switched.' });
-    expect(page.shown()).toEqual([]);
+    page.send('late');
+    page.input.value = 'more';
 
-    page.receive({ type: 'openChat', key: 1, stashKey: 2 });
-    expect(page.shown()).toEqual(['first', 'One.']);
-    expect(page.input.value).toBe('late');
+    expect(show(page, 2)).toMatchObject({ left: { key: 1, draft: 'late\nmore' } });
+    expect(page.shown()).toEqual([]);
+  });
+
+  it('puts a refused message back into the composer and shows why', () => {
+    const page = openPage();
+    show(page, 1);
+    const { id } = page.send('hello');
+    page.receive({ type: 'error', id, message: 'The chat is being switched.', withdraw: true });
+
+    expect(page.input.value).toBe('hello');
+    expect(page.shown()).toEqual(['The chat is being switched.']);
+    expect(page.posted).toContainEqual({ type: 'draft', chat: 1, text: 'hello' });
+    expect(page.posted.at(-1)).toEqual({ type: 'shown', id, text: 'The chat is being switched.' });
   });
 
   it('tells the extension when it takes back a message a test submitted', () => {
     const page = openPage();
-    page.receive({ type: 'start', key: 1 });
+    show(page, 1);
     exchange(page, 'first', 'One.');
     page.receive({ type: 'submit', text: 'from a test', token: 5 });
-    page.receive({ type: 'newChat', stashKey: 1, key: 2 });
+    show(page, 2);
 
     expect(page.posted).toContainEqual({ type: 'rejected', token: 5 });
   });

@@ -36,15 +36,16 @@ describe('the extension manifest', () => {
     }
   });
 
-  it('shows New Chat as an icon in the title bar of the iCode view only', () => {
-    const command = manifest.contributes.commands.find(
-      (entry) => entry.command === 'icode.newChat',
-    );
-    expect(command?.icon).toBe('$(add)');
+  it.each([
+    ['icode.newChat', '$(add)', 'navigation@1'],
+    ['icode.chatHistory', '$(history)', 'navigation@2'],
+  ])('shows %s as an icon in the title bar of the iCode view only', (name, icon, group) => {
+    const command = manifest.contributes.commands.find((entry) => entry.command === name);
+    expect(command?.icon).toBe(icon);
     expect(manifest.contributes.menus['view/title']).toContainEqual({
-      command: 'icode.newChat',
+      command: name,
       when: 'view == icode.chat',
-      group: 'navigation',
+      group,
     });
   });
 });

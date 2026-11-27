@@ -17,8 +17,9 @@ interface TestApi {
     /** What the page displayed for this message. */
     readonly shown?: string;
   }>;
-  newChat(): Promise<{ readonly kind: string; readonly previous?: number }>;
-  reopenChat(key?: number): Promise<string>;
+  newChat(): Promise<string>;
+  chats(): { readonly key: number; readonly text: string; readonly current: boolean }[];
+  openChat(key: number): Promise<string>;
 }
 
 interface SeenRequest {
@@ -224,7 +225,7 @@ export const engineTests: readonly TestCase[] = [
     },
   },
   {
-    name: 'chat panel: a new chat starts an empty conversation, and Undo brings the old one back',
+    name: 'chat panel: a new chat starts an empty conversation, and the chat list opens the old one again',
     async run() {
       const server = await startModelServer((response) => {
         streamReply(response, ['Noted.']);
@@ -238,12 +239,13 @@ export const engineTests: readonly TestCase[] = [
           async () => {
             const commands = await vscode.commands.getCommands(true);
             assert.ok(commands.includes('icode.newChat'));
-            assert.ok(commands.includes('icode.reopenPreviousChat'));
+            assert.ok(commands.includes('icode.chatHistory'));
 
+            // Earlier tests used the same panel, so this test begins its own chat.
+            assert.notEqual(await extension.newChat(), 'closed');
             const first = await extension.submitInChatView('the word is apple');
             assert.equal(first.stopReason, 'end');
-            const started = await extension.newChat();
-            assert.equal(started.kind, 'started');
+            assert.equal(await extension.newChat(), 'started');
 
             // The new chat carries nothing from the old one.
             await extension.submitInChatView('a new topic');
@@ -251,7 +253,9 @@ export const engineTests: readonly TestCase[] = [
               { role: 'user', content: 'a new topic' },
             ]);
 
-            assert.equal(await extension.reopenChat(started.previous), 'reopened');
+            const old = extension.chats().find((chat) => chat.text === 'the word is apple');
+            assert.ok(old !== undefined && !old.current);
+            assert.equal(await extension.openChat(old.key), 'opened');
             await extension.submitInChatView('what was the word?');
             const sent = server.requests.at(-1)?.body.messages as unknown[];
             assert.deepEqual(sent.slice(-3), [

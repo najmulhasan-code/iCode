@@ -7,11 +7,11 @@
 // Each message the user sends gets a number. Every answer from the extension
 // names that number, and an answer for any other number is ignored.
 //
-// A conversation put aside by "New Chat" keeps its elements and the unsent
-// text of the composer here, under a key the extension chose, so that it can
-// be shown again exactly as it was. Every message sent names the key of the
-// conversation shown, so the extension can refuse one sent just before a
-// switch reached this page.
+// The extension keeps every chat. This page draws the one it is told to show,
+// and reports the unsent text of that chat as it changes. Every message sent
+// names the chat it was typed in, so the extension can refuse one sent just
+// before a switch reached this page. Each switch is confirmed, with the final
+// unsent text of the chat the page leaves.
 (function () {
   const vscode = acquireVsCodeApi();
   const messages = document.getElementById('messages');
@@ -33,10 +33,8 @@
    * of the message and of its reply, and the test token it came with.
    */
   let current = null;
-  /** The key of the conversation shown, as the extension last said. */
+  /** The key of the chat shown, as the extension last said. Null until then. */
   let chatKey = null;
-  /** Conversations put aside, by key: their elements and the composer text. */
-  const aside = new Map();
 
   function add(kind, text) {
     const element = document.createElement('div');
@@ -52,13 +50,20 @@
     status.hidden = !busy;
     stopButton.hidden = !busy;
     sendButton.hidden = busy;
-    sendButton.disabled = busy || input.value.trim() === '';
+    sendButton.disabled = busy || chatKey === null || input.value.trim() === '';
+  }
+
+  /** Tells the extension the unsent text of the chat shown. */
+  function reportDraft() {
+    if (chatKey !== null) {
+      vscode.postMessage({ type: 'draft', chat: chatKey, text: input.value });
+    }
   }
 
   /** Sends a message. Returns false when it cannot be sent right now. */
   function submit(text, token) {
     const trimmed = text.trim();
-    if (current !== null || trimmed === '') {
+    if (current !== null || chatKey === null || trimmed === '') {
       return false;
     }
     welcome.hidden = true;
@@ -87,6 +92,18 @@
   }
 
   /**
+   * Takes the request that is being answered off the page and puts its text
+   * back into the composer, before what the composer already holds.
+   */
+  function withdraw() {
+    const { text, user, reply } = current;
+    current = null;
+    user.remove();
+    reply.remove();
+    input.value = input.value === '' ? text : `${text}\n${input.value}`;
+  }
+
+  /**
    * The extension switches only once its last reply has ended, so a request
    * still waiting here was sent after the switch began and will be refused.
    * Its message is taken back into the composer, so nothing typed is lost.
@@ -95,64 +112,48 @@
     if (current === null) {
       return;
     }
-    const { text, user, reply, token } = current;
-    current = null;
-    user.remove();
-    reply.remove();
-    input.value = input.value === '' ? text : `${text}\n${input.value}`;
+    const { token } = current;
+    withdraw();
     if (token !== undefined) {
       vscode.postMessage({ type: 'rejected', token });
     }
   }
 
-  /** Takes the shown conversation off the page and returns it. */
-  function takeShown() {
-    const elements = Array.from(messages.children).filter((element) => element !== welcome);
-    for (const element of elements) {
-      element.remove();
+  function draw(entries) {
+    for (const element of Array.from(messages.children)) {
+      if (element !== welcome) {
+        element.remove();
+      }
     }
-    const shown = { elements, draft: input.value };
-    input.value = '';
-    return shown;
-  }
-
-  function show(conversation) {
-    for (const element of conversation.elements) {
-      messages.append(element);
+    for (const entry of entries) {
+      if (entry.kind === 'user') {
+        add('user', entry.text);
+      } else if (entry.kind === 'reply') {
+        if (entry.text !== '') {
+          add('assistant', entry.text);
+        }
+        const note = NOTE_BY_STOP_REASON[entry.stopReason];
+        if (note !== undefined) {
+          add('note', note);
+        }
+      } else if (entry.kind === 'error') {
+        add('error', entry.text);
+      }
     }
-    welcome.hidden = conversation.elements.length > 0;
-    if (conversation.draft !== '') {
-      input.value = conversation.draft;
-    }
+    welcome.hidden = entries.length > 0;
     messages.scrollTop = messages.scrollHeight;
   }
 
-  /** Puts the shown conversation aside. One with nothing in it is not kept. */
-  function putAside(stashKey) {
-    const shown = takeShown();
-    if (shown.elements.length === 0 && shown.draft === '') {
-      vscode.postMessage({ type: 'dropped', key: stashKey });
-    } else {
-      aside.set(stashKey, shown);
+  function show(message) {
+    withdrawPending();
+    // The final unsent text of the chat this page leaves.
+    const left = chatKey === null ? null : { key: chatKey, draft: input.value };
+    vscode.postMessage({ type: 'switched', seq: message.seq, left });
+    chatKey = message.key;
+    draw(message.entries);
+    if (!message.carry) {
+      input.value = message.draft;
     }
-  }
-
-  function newChat(stashKey, key) {
-    withdrawPending();
-    putAside(stashKey);
-    chatKey = key;
-    welcome.hidden = false;
-    updateControls();
-    input.focus();
-  }
-
-  function openChat(key, stashKey) {
-    withdrawPending();
-    const conversation = aside.get(key);
-    aside.delete(key);
-    putAside(stashKey);
-    chatKey = key;
-    show(conversation ?? { elements: [], draft: '' });
     updateControls();
     input.focus();
   }
@@ -161,12 +162,16 @@
     if (submit(input.value)) {
       input.value = '';
       updateControls();
+      reportDraft();
     }
   });
   stopButton.addEventListener('click', () => {
     vscode.postMessage({ type: 'cancel' });
   });
-  input.addEventListener('input', updateControls);
+  input.addEventListener('input', () => {
+    updateControls();
+    reportDraft();
+  });
   input.addEventListener('keydown', (event) => {
     // Enter sends. Shift and Enter starts a new line.
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
@@ -183,16 +188,8 @@
       }
       return;
     }
-    if (message.type === 'start') {
-      chatKey = message.key;
-      return;
-    }
-    if (message.type === 'newChat') {
-      newChat(message.stashKey, message.key);
-      return;
-    }
-    if (message.type === 'openChat') {
-      openChat(message.key, message.stashKey);
+    if (message.type === 'show') {
+      show(message);
       return;
     }
     if (message.type === 'focus') {
@@ -207,6 +204,15 @@
       messages.scrollTop = messages.scrollHeight;
     } else if (message.type === 'end') {
       finish(NOTE_BY_STOP_REASON[message.stopReason], 'note');
+    } else if (message.type === 'error' && message.withdraw === true) {
+      // The message was not sent. It goes back into the composer, and the reason is shown.
+      const { id } = current;
+      withdraw();
+      add('error', message.message);
+      updateControls();
+      reportDraft();
+      input.focus();
+      vscode.postMessage({ type: 'shown', id, text: message.message });
     } else if (message.type === 'error') {
       finish(message.message, 'error');
     }

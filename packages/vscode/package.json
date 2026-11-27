@@ -57,9 +57,10 @@
         "icon": "$(add)"
       },
       {
-        "command": "icode.reopenPreviousChat",
-        "title": "Reopen Previous Chat",
-        "category": "iCode"
+        "command": "icode.chatHistory",
+        "title": "Chat History",
+        "category": "iCode",
+        "icon": "$(history)"
       }
     ],
     "menus": {
@@ -67,7 +68,12 @@
         {
           "command": "icode.newChat",
           "when": "view == icode.chat",
-          "group": "navigation"
+          "group": "navigation@1"
+        },
+        {
+          "command": "icode.chatHistory",
+          "when": "view == icode.chat",
+          "group": "navigation@2"
         }
       ]
     },
