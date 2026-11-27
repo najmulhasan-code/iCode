@@ -130,6 +130,10 @@ body {
 .icode-markdown [data-streamdown='table-cell'] {
   padding: 5px 10px;
   font-size: 0.95em;
+  /* Cells break between words only, never inside one; a table too wide for
+     the panel scrolls sideways instead. */
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 /* High contrast themes keep their own contrast: code is shown without colours. */
