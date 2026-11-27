@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
  * The script runs unchanged against these, so its own logic is what is tested.
  */
 class FakeElement {
+  id = '';
   className = '';
   hidden = false;
   disabled = false;
@@ -18,6 +19,19 @@ class FakeElement {
   #parent: FakeElement | undefined;
   readonly #children: FakeElement[] = [];
   readonly #listeners = new Map<string, ((event: unknown) => void)[]>();
+  readonly #attributes = new Map<string, string>();
+
+  setAttribute(name: string, value: string): void {
+    this.#attributes.set(name, value);
+  }
+
+  removeAttribute(name: string): void {
+    this.#attributes.delete(name);
+  }
+
+  getAttribute(name: string): string | null {
+    return this.#attributes.get(name) ?? null;
+  }
 
   get children(): FakeElement[] {
     return [...this.#children];
@@ -61,7 +75,21 @@ const SCRIPT = readFileSync(join(__dirname, '..', 'media', 'chat.js'), 'utf8');
 /** Runs the panel script on a fake page and returns ways to act on it. */
 function openPage() {
   const elements = new Map<string, FakeElement>();
-  for (const id of ['messages', 'welcome', 'status', 'input', 'send', 'stop']) {
+  for (const id of [
+    'messages',
+    'welcome',
+    'status',
+    'input',
+    'send',
+    'stop',
+    'chat',
+    'history',
+    'history-back',
+    'history-search',
+    'history-list',
+    'history-empty',
+    'icode-load',
+  ]) {
     elements.set(id, new FakeElement());
   }
   const element = (id: string): FakeElement => {
@@ -72,11 +100,19 @@ function openPage() {
     return found;
   };
   element('messages').append(element('welcome'));
+  // As on the real page, the chat list starts hidden.
+  element('history').hidden = true;
+  element('icode-load').setAttribute('content', '7');
+  /** What the page sent, without the load number, which `loads` keeps. */
   const posted: Record<string, unknown>[] = [];
+  const loads: unknown[] = [];
   const window = new FakeElement();
   runInNewContext(SCRIPT, {
     acquireVsCodeApi: () => ({
-      postMessage: (message: Record<string, unknown>) => posted.push(message),
+      postMessage: ({ load, ...message }: Record<string, unknown>) => {
+        loads.push(load);
+        posted.push(message);
+      },
     }),
     document: {
       getElementById: element,
@@ -87,6 +123,7 @@ function openPage() {
   const input = element('input');
   return {
     posted,
+    loads,
     input,
     /** A message from the extension. */
     receive: (message: Record<string, unknown>) => {
@@ -97,7 +134,10 @@ function openPage() {
       input.value = text;
       input.dispatch('input');
       element('send').click();
-      return posted.at(-1) as { id: number; chat: number };
+      return posted.filter((message) => message.type === 'send').at(-1) as {
+        id: number;
+        chat: number;
+      };
     },
     /** The text of each message shown, in order. */
     shown: () =>
@@ -105,7 +145,35 @@ function openPage() {
         .children.filter((child) => child !== element('welcome'))
         .map((child) => child.textContent),
     welcomeShown: () => !element('welcome').hidden,
+    element,
+    /** Presses a key on an element. */
+    press: (id: string, key: string) => {
+      element(id).dispatch('keydown', { key, preventDefault: () => undefined });
+    },
+    /** Whether the chat list is shown in place of the chat. */
+    historyShown: () => !element('history').hidden && element('chat').hidden,
+    /** Each row of the chat list: its name, its description, and whether it is highlighted. */
+    rows: () =>
+      element('history-list').children.map((row) => ({
+        title: row.children[0]?.textContent,
+        description: row.children[1]?.textContent,
+        highlighted: row.getAttribute('aria-selected') === 'true',
+      })),
   };
+}
+
+/** Shows a chat on the page, as the extension does, and returns the page's confirmation. */
+let seq = 0;
+function show(
+  page: ReturnType<typeof openPage>,
+  key: number,
+  entries: unknown[] = [],
+  draft = '',
+  carry = false,
+) {
+  seq += 1;
+  page.receive({ type: 'show', seq, key, entries, draft, carry });
+  return page.posted.find((message) => message.type === 'switched' && message.seq === seq);
 }
 
 /** Sends a message and lets its reply end. */
@@ -116,70 +184,228 @@ function exchange(page: ReturnType<typeof openPage>, text: string, reply: string
 }
 
 describe('the panel script', () => {
-  it('names the conversation it shows in every message it sends', () => {
+  it('puts the number of its copy of the page on every message', () => {
     const page = openPage();
-    page.receive({ type: 'start', key: 1 });
-    exchange(page, 'hello', 'Hi.');
-    page.receive({ type: 'newChat', stashKey: 1, key: 2 });
+    show(page, 1);
+    page.send('hello');
 
-    expect(page.send('again')).toMatchObject({ type: 'send', chat: 2, text: 'again' });
+    expect(page.loads.length).toBeGreaterThan(2);
+    expect(new Set(page.loads)).toEqual(new Set([7]));
   });
 
-  it('keeps the unsent text of both conversations across New Chat and Undo', () => {
+  it('sends nothing until it has been shown a chat', () => {
     const page = openPage();
-    page.receive({ type: 'start', key: 1 });
+    page.input.value = 'too early';
+    page.input.dispatch('input');
+    page.send('too early');
+
+    expect(page.posted.filter((message) => message.type === 'send')).toEqual([]);
+  });
+
+  it('names the chat it shows in every message it sends', () => {
+    const page = openPage();
+    show(page, 1);
     exchange(page, 'hello', 'Hi.');
-    page.input.value = 'draft A';
-    page.receive({ type: 'newChat', stashKey: 1, key: 2 });
-    expect(page.input.value).toBe('');
-    expect(page.shown()).toEqual([]);
-    expect(page.welcomeShown()).toBe(true);
+    show(page, 2);
 
-    page.input.value = 'draft B';
-    page.receive({ type: 'openChat', key: 1, stashKey: 2 });
-    expect(page.input.value).toBe('draft A');
-    expect(page.shown()).toEqual(['hello', 'Hi.']);
+    // The send also says that the composer is empty now.
+    expect(page.send('again')).toMatchObject({ type: 'send', chat: 2, text: 'again', draft: '' });
+  });
+
+  it('draws a chat from its entries, with the notes and errors in place', () => {
+    const page = openPage();
+    show(page, 1, [
+      { kind: 'user', text: 'one' },
+      { kind: 'reply', text: 'Partly', stopReason: 'cancelled' },
+      { kind: 'user', text: 'two' },
+      { kind: 'reply', text: '', stopReason: 'refusal' },
+      { kind: 'user', text: 'three' },
+      { kind: 'reply', text: 'Half' },
+      { kind: 'error', text: 'The provider could not be reached.' },
+    ]);
+
+    expect(page.shown()).toEqual([
+      'one',
+      'Partly',
+      'Stopped.',
+      'two',
+      'The model declined this request.',
+      'three',
+      'Half',
+      'The provider could not be reached.',
+    ]);
     expect(page.welcomeShown()).toBe(false);
-    expect(page.posted.some((message) => message.type === 'dropped')).toBe(false);
+  });
 
-    page.receive({ type: 'openChat', key: 2, stashKey: 1 });
+  it('reports unsent text as it changes, and confirms each switch with the text it leaves', () => {
+    const page = openPage();
+    expect(show(page, 1)).toEqual({ type: 'switched', seq, left: null });
+    page.input.value = 'draft A';
+    page.input.dispatch('input');
+    expect(page.posted.at(-1)).toEqual({ type: 'draft', chat: 1, text: 'draft A', returned: [] });
+
+    expect(show(page, 2, [], 'draft B')).toEqual({
+      type: 'switched',
+      seq,
+      left: { key: 1, draft: 'draft A', returned: [] },
+    });
     expect(page.input.value).toBe('draft B');
     expect(page.shown()).toEqual([]);
+    expect(page.welcomeShown()).toBe(true);
   });
 
-  it('does not keep a conversation with nothing in it, and says so', () => {
+  it('keeps the composer text for the new chat when told to carry it', () => {
     const page = openPage();
-    page.receive({ type: 'start', key: 1 });
-    exchange(page, 'hello', 'Hi.');
-    page.receive({ type: 'newChat', stashKey: 1, key: 2 });
-    page.receive({ type: 'openChat', key: 1, stashKey: 2 });
+    show(page, 1, [{ kind: 'user', text: 'topic' }]);
+    page.input.value = 'carry me';
 
-    expect(page.posted.at(-1)).toEqual({ type: 'dropped', key: 2 });
-    expect(page.shown()).toEqual(['hello', 'Hi.']);
+    expect(show(page, 2, [], '', true)).toMatchObject({ left: { key: 1, draft: 'carry me' } });
+    expect(page.input.value).toBe('carry me');
   });
 
-  it('takes back a message sent just before a switch, into the composer of its conversation', () => {
+  it('takes back a message sent just before a switch, into the text it confirms for its chat', () => {
     const page = openPage();
-    page.receive({ type: 'start', key: 1 });
+    show(page, 1);
     exchange(page, 'first', 'One.');
     const late = page.send('late');
-    page.receive({ type: 'newChat', stashKey: 1, key: 2 });
-    // The extension refuses the late message, and the page is already elsewhere.
-    page.receive({ type: 'error', id: late.id, message: 'The chat was switched.' });
-    expect(page.shown()).toEqual([]);
+    page.input.value = 'more';
 
-    page.receive({ type: 'openChat', key: 1, stashKey: 2 });
-    expect(page.shown()).toEqual(['first', 'One.']);
-    expect(page.input.value).toBe('late');
+    expect(show(page, 2)).toMatchObject({
+      left: { key: 1, draft: 'late\nmore', returned: [late.id] },
+    });
+    expect(page.shown()).toEqual([]);
+  });
+
+  it('puts a refused message back into the composer and shows why', () => {
+    const page = openPage();
+    show(page, 1);
+    const { id } = page.send('hello');
+    page.receive({ type: 'error', id, message: 'The chat is being switched.', withdraw: true });
+
+    expect(page.input.value).toBe('hello');
+    expect(page.shown()).toEqual(['The chat is being switched.']);
+    expect(page.posted).toContainEqual({ type: 'draft', chat: 1, text: 'hello', returned: [id] });
+    expect(page.posted.at(-1)).toEqual({ type: 'shown', id, text: 'The chat is being switched.' });
   });
 
   it('tells the extension when it takes back a message a test submitted', () => {
     const page = openPage();
-    page.receive({ type: 'start', key: 1 });
+    show(page, 1);
     exchange(page, 'first', 'One.');
     page.receive({ type: 'submit', text: 'from a test', token: 5 });
-    page.receive({ type: 'newChat', stashKey: 1, key: 2 });
+    show(page, 2);
 
     expect(page.posted).toContainEqual({ type: 'rejected', token: 5 });
+  });
+});
+
+describe('the chat list in the panel', () => {
+  const ITEMS = [
+    { key: 3, title: 'fix the failing test', description: 'current' },
+    { key: 2, title: 'explain the parser', description: '5 minutes ago' },
+    { key: 1, title: 'fix the build', description: '1 hour ago' },
+  ];
+
+  function withList() {
+    const page = openPage();
+    show(page, 3);
+    page.receive({ type: 'history', items: ITEMS });
+    return page;
+  }
+
+  it('takes the place of the chat, newest first, with the first row highlighted', () => {
+    const page = withList();
+
+    expect(page.historyShown()).toBe(true);
+    expect(page.rows()).toEqual([
+      { title: 'fix the failing test', description: 'current', highlighted: true },
+      { title: 'explain the parser', description: '5 minutes ago', highlighted: false },
+      { title: 'fix the build', description: '1 hour ago', highlighted: false },
+    ]);
+    expect(page.element('history-search').getAttribute('aria-activedescendant')).toBe(
+      'history-item-3',
+    );
+  });
+
+  it('keeps only the chats whose name holds the search text', () => {
+    const page = withList();
+    const search = page.element('history-search');
+    search.value = 'FIX';
+    search.dispatch('input');
+
+    expect(page.rows().map((row) => row.title)).toEqual(['fix the failing test', 'fix the build']);
+
+    search.value = 'nothing like this';
+    search.dispatch('input');
+    expect(page.rows()).toEqual([]);
+    expect(page.element('history-empty').hidden).toBe(false);
+    expect(page.element('history-empty').textContent).toBe('No chats match.');
+  });
+
+  it('says so when there are no chats yet', () => {
+    const page = openPage();
+    show(page, 1);
+    page.receive({ type: 'history', items: [] });
+
+    expect(page.element('history-empty').textContent).toBe('No chats yet.');
+  });
+
+  it('opens the highlighted chat with the arrow keys and Enter, and goes back to the chat', () => {
+    const page = withList();
+    page.press('history-search', 'ArrowDown');
+    page.press('history-search', 'ArrowDown');
+    page.press('history-search', 'ArrowDown');
+    page.press('history-search', 'ArrowUp');
+    expect(page.rows().map((row) => row.highlighted)).toEqual([false, false, true]);
+
+    page.press('history-search', 'Enter');
+    expect(page.posted.at(-1)).toEqual({ type: 'open', key: 1 });
+    expect(page.historyShown()).toBe(false);
+  });
+
+  it('opens a chat that is clicked', () => {
+    const page = withList();
+    page.element('history-list').children[1]?.click();
+
+    expect(page.posted.at(-1)).toEqual({ type: 'open', key: 2 });
+    expect(page.historyShown()).toBe(false);
+  });
+
+  it('closes with Escape or the back button, and opens nothing', () => {
+    const page = withList();
+    page.press('history', 'Escape');
+    expect(page.historyShown()).toBe(false);
+
+    page.receive({ type: 'history', items: ITEMS });
+    page.element('history-back').click();
+    expect(page.historyShown()).toBe(false);
+    expect(page.posted.some((message) => message.type === 'open')).toBe(false);
+  });
+
+  it('makes way for the composer when the extension asks for it', () => {
+    const page = withList();
+    page.receive({ type: 'focus' });
+
+    expect(page.historyShown()).toBe(false);
+  });
+
+  it('leaves keys that finish a character being composed to the search box', () => {
+    const page = withList();
+    for (const key of ['Enter', 'ArrowDown', 'Escape']) {
+      const event = { key, isComposing: true, preventDefault: () => undefined };
+      page.element('history-search').dispatch('keydown', event);
+      page.element('history').dispatch('keydown', event);
+    }
+
+    expect(page.historyShown()).toBe(true);
+    expect(page.rows()[0]?.highlighted).toBe(true);
+    expect(page.posted.some((message) => message.type === 'open')).toBe(false);
+  });
+
+  it('closes when the extension switches the chat', () => {
+    const page = withList();
+    show(page, 2);
+
+    expect(page.historyShown()).toBe(false);
   });
 });

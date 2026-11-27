@@ -28,6 +28,19 @@ export class ChatError extends Error {
   }
 }
 
+/**
+ * The core that held the conversation has stopped since, so the model no
+ * longer has its history. Sending in it would silently begin again without it.
+ */
+export class ConversationLostError extends ChatError {
+  constructor() {
+    super(
+      "This chat can no longer be continued, because iCode's engine restarted and the model lost its history. Start a new chat to continue. Your message goes with it.",
+    );
+    this.name = 'ConversationLostError';
+  }
+}
+
 /** A conversation in the core: the id the core gave it, and the core process that holds it. */
 export interface ConversationRef {
   readonly generation: number;
@@ -77,7 +90,8 @@ function toChatError(error: unknown): ChatError {
  *
  * All messages belong to one conversation, which the core keeps. This class
  * holds only its id. A core that had to be started again has lost the
- * conversation, so a new one is begun there.
+ * conversation, so a message to it is refused. Only a new conversation can be
+ * begun there.
  */
 export class ChatSession {
   readonly #dependencies: ChatSessionDependencies;
@@ -152,7 +166,13 @@ export class ChatSession {
       if (this.#wasCancelled()) {
         return 'cancelled';
       }
-      if (this.#conversation?.generation !== session.generation) {
+      if (
+        this.#conversation !== undefined &&
+        this.#conversation.generation !== session.generation
+      ) {
+        throw new ConversationLostError();
+      }
+      if (this.#conversation === undefined) {
         const created = await session.connection.request(CONVERSATION_CREATE_METHOD);
         if (!isConversationCreateResult(created)) {
           throw new ChatError('The core did not start a conversation.');
@@ -197,28 +217,13 @@ export class ChatSession {
 
   /**
    * Makes a conversation that was set aside the current one again, after
-   * stopping any reply. Resolves false, and changes nothing, when the core
-   * that held the conversation has stopped since, because the conversation
-   * ended with it. Nothing is sent to the model.
+   * stopping any reply. Nothing is sent to the model and the core is not
+   * asked. Whether the core still holds the conversation is checked when a
+   * message is sent, however the conversation was reached.
    */
-  async resume(conversation: ConversationRef | undefined): Promise<boolean> {
+  async resume(conversation: ConversationRef | undefined): Promise<void> {
     await this.#settle();
-    if (conversation !== undefined) {
-      let generation: number;
-      try {
-        generation = (await this.#dependencies.core.session()).generation;
-      } catch {
-        return false;
-      }
-      if (generation !== conversation.generation) {
-        return false;
-      }
-    }
-    if (this.#sending) {
-      throw new ChatError('A reply is still being written. Wait for it or stop it first.');
-    }
     this.#conversation = conversation;
-    return true;
   }
 
   /** Stops the running send, if any, and waits until it has ended. */

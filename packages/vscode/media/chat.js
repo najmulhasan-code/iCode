@@ -7,19 +7,31 @@
 // Each message the user sends gets a number. Every answer from the extension
 // names that number, and an answer for any other number is ignored.
 //
-// A conversation put aside by "New Chat" keeps its elements and the unsent
-// text of the composer here, under a key the extension chose, so that it can
-// be shown again exactly as it was. Every message sent names the key of the
-// conversation shown, so the extension can refuse one sent just before a
-// switch reached this page.
+// The extension keeps every chat. This page draws the one it is told to show,
+// and reports the unsent text of that chat as it changes. Every message sent
+// names the chat it was typed in, so the extension can refuse one sent just
+// before a switch reached this page. Each switch is confirmed, with the final
+// unsent text of the chat the page leaves.
 (function () {
   const vscode = acquireVsCodeApi();
+  // The number of this copy of the page. Every message carries it, so the
+  // extension can ignore a copy that was replaced.
+  const load = Number(document.getElementById('icode-load').getAttribute('content'));
+  function post(message) {
+    vscode.postMessage({ ...message, load });
+  }
   const messages = document.getElementById('messages');
   const welcome = document.getElementById('welcome');
   const status = document.getElementById('status');
   const input = document.getElementById('input');
   const sendButton = document.getElementById('send');
   const stopButton = document.getElementById('stop');
+  const chatView = document.getElementById('chat');
+  const historyView = document.getElementById('history');
+  const historyBack = document.getElementById('history-back');
+  const historySearch = document.getElementById('history-search');
+  const historyList = document.getElementById('history-list');
+  const historyEmpty = document.getElementById('history-empty');
 
   const NOTE_BY_STOP_REASON = {
     cancelled: 'Stopped.',
@@ -33,10 +45,10 @@
    * of the message and of its reply, and the test token it came with.
    */
   let current = null;
-  /** The key of the conversation shown, as the extension last said. */
+  /** The key of the chat shown, as the extension last said. Null until then. */
   let chatKey = null;
-  /** Conversations put aside, by key: their elements and the composer text. */
-  const aside = new Map();
+  /** Numbers of messages put back into the composer since the last report. */
+  let returned = [];
 
   function add(kind, text) {
     const element = document.createElement('div');
@@ -52,13 +64,27 @@
     status.hidden = !busy;
     stopButton.hidden = !busy;
     sendButton.hidden = busy;
-    sendButton.disabled = busy || input.value.trim() === '';
+    sendButton.disabled = busy || chatKey === null || input.value.trim() === '';
   }
 
-  /** Sends a message. Returns false when it cannot be sent right now. */
-  function submit(text, token) {
+  /**
+   * Tells the extension the unsent text of the chat shown, and which messages
+   * put back into the composer that text now holds.
+   */
+  function reportDraft() {
+    if (chatKey !== null) {
+      post({ type: 'draft', chat: chatKey, text: input.value, returned });
+      returned = [];
+    }
+  }
+
+  /**
+   * Sends a message. Returns false when it cannot be sent right now. A message
+   * typed into the composer empties it, and the send says so.
+   */
+  function submit(text, token, fromComposer) {
     const trimmed = text.trim();
-    if (current !== null || trimmed === '') {
+    if (current !== null || chatKey === null || trimmed === '') {
       return false;
     }
     welcome.hidden = true;
@@ -66,7 +92,15 @@
     current = { id: nextId, text: trimmed, user, reply: add('assistant', ''), token };
     nextId += 1;
     updateControls();
-    vscode.postMessage({ type: 'send', id: current.id, chat: chatKey, text: trimmed, token });
+    const draft = fromComposer ? '' : input.value;
+    post({
+      type: 'send',
+      id: current.id,
+      chat: chatKey,
+      text: trimmed,
+      draft,
+      token,
+    });
     return true;
   }
 
@@ -83,7 +117,20 @@
     updateControls();
     input.focus();
     // Tells the extension what this page displayed for the request.
-    vscode.postMessage({ type: 'shown', id, text: kind === 'error' ? note : shown });
+    post({ type: 'shown', id, text: kind === 'error' ? note : shown });
+  }
+
+  /**
+   * Takes the request that is being answered off the page and puts its text
+   * back into the composer, before what the composer already holds.
+   */
+  function withdraw() {
+    const { id, text, user, reply } = current;
+    current = null;
+    returned.push(id);
+    user.remove();
+    reply.remove();
+    input.value = input.value === '' ? text : `${text}\n${input.value}`;
   }
 
   /**
@@ -95,78 +142,167 @@
     if (current === null) {
       return;
     }
-    const { text, user, reply, token } = current;
-    current = null;
-    user.remove();
-    reply.remove();
-    input.value = input.value === '' ? text : `${text}\n${input.value}`;
+    const { token } = current;
+    withdraw();
     if (token !== undefined) {
-      vscode.postMessage({ type: 'rejected', token });
+      post({ type: 'rejected', token });
     }
   }
 
-  /** Takes the shown conversation off the page and returns it. */
-  function takeShown() {
-    const elements = Array.from(messages.children).filter((element) => element !== welcome);
-    for (const element of elements) {
-      element.remove();
+  function draw(entries) {
+    for (const element of Array.from(messages.children)) {
+      if (element !== welcome) {
+        element.remove();
+      }
     }
-    const shown = { elements, draft: input.value };
-    input.value = '';
-    return shown;
-  }
-
-  function show(conversation) {
-    for (const element of conversation.elements) {
-      messages.append(element);
+    for (const entry of entries) {
+      if (entry.kind === 'user') {
+        add('user', entry.text);
+      } else if (entry.kind === 'reply') {
+        if (entry.text !== '') {
+          add('assistant', entry.text);
+        }
+        const note = NOTE_BY_STOP_REASON[entry.stopReason];
+        if (note !== undefined) {
+          add('note', note);
+        }
+      } else if (entry.kind === 'error') {
+        add('error', entry.text);
+      }
     }
-    welcome.hidden = conversation.elements.length > 0;
-    if (conversation.draft !== '') {
-      input.value = conversation.draft;
-    }
+    welcome.hidden = entries.length > 0;
     messages.scrollTop = messages.scrollHeight;
   }
 
-  /** Puts the shown conversation aside. One with nothing in it is not kept. */
-  function putAside(stashKey) {
-    const shown = takeShown();
-    if (shown.elements.length === 0 && shown.draft === '') {
-      vscode.postMessage({ type: 'dropped', key: stashKey });
+  function show(message) {
+    withdrawPending();
+    // The final unsent text of the chat this page leaves.
+    const left = chatKey === null ? null : { key: chatKey, draft: input.value, returned };
+    returned = [];
+    post({ type: 'switched', seq: message.seq, left });
+    chatKey = message.key;
+    draw(message.entries);
+    if (!message.carry) {
+      input.value = message.draft;
+    }
+    updateControls();
+    input.focus();
+  }
+
+  // The chat list takes the place of the chat until a chat is picked or the
+  // list is closed. Typing in the search box filters it. The arrow keys move
+  // the highlight, Enter opens the highlighted chat, and Escape goes back.
+  /** All rows of the list, and the rows that match the search. */
+  let historyItems = [];
+  let matching = [];
+  let highlighted = -1;
+
+  function highlight(index) {
+    highlighted = index;
+    Array.from(historyList.children).forEach((row, position) => {
+      row.className = position === index ? 'history-item highlighted' : 'history-item';
+      row.setAttribute('aria-selected', position === index ? 'true' : 'false');
+      if (position === index && typeof row.scrollIntoView === 'function') {
+        row.scrollIntoView({ block: 'nearest' });
+      }
+    });
+    if (index >= 0) {
+      historySearch.setAttribute('aria-activedescendant', `history-item-${matching[index].key}`);
     } else {
-      aside.set(stashKey, shown);
+      historySearch.removeAttribute('aria-activedescendant');
     }
   }
 
-  function newChat(stashKey, key) {
-    withdrawPending();
-    putAside(stashKey);
-    chatKey = key;
-    welcome.hidden = false;
-    updateControls();
+  function drawHistory() {
+    const query = historySearch.value.trim().toLowerCase();
+    matching = historyItems.filter((item) => item.title.toLowerCase().includes(query));
+    for (const row of Array.from(historyList.children)) {
+      row.remove();
+    }
+    for (const item of matching) {
+      const row = document.createElement('li');
+      row.id = `history-item-${item.key}`;
+      row.setAttribute('role', 'option');
+      const title = document.createElement('span');
+      title.className = 'history-title';
+      title.textContent = item.title;
+      const description = document.createElement('span');
+      description.className = 'history-description';
+      description.textContent = item.description;
+      row.append(title);
+      row.append(description);
+      row.addEventListener('click', () => {
+        pick(item.key);
+      });
+      historyList.append(row);
+    }
+    historyEmpty.textContent = historyItems.length === 0 ? 'No chats yet.' : 'No chats match.';
+    historyEmpty.hidden = matching.length > 0;
+    highlight(matching.length > 0 ? 0 : -1);
+  }
+
+  function openHistory(items) {
+    historyItems = items;
+    historySearch.value = '';
+    chatView.hidden = true;
+    historyView.hidden = false;
+    drawHistory();
+    historySearch.focus();
+  }
+
+  function closeHistory() {
+    if (historyView.hidden) {
+      return;
+    }
+    historyView.hidden = true;
+    chatView.hidden = false;
     input.focus();
   }
 
-  function openChat(key, stashKey) {
-    withdrawPending();
-    const conversation = aside.get(key);
-    aside.delete(key);
-    putAside(stashKey);
-    chatKey = key;
-    show(conversation ?? { elements: [], draft: '' });
-    updateControls();
-    input.focus();
+  function pick(key) {
+    closeHistory();
+    post({ type: 'open', key });
   }
+
+  historyBack.addEventListener('click', closeHistory);
+  historySearch.addEventListener('input', drawHistory);
+  historySearch.addEventListener('keydown', (event) => {
+    // Keys that finish a character being composed belong to the search box.
+    if (event.isComposing) {
+      return;
+    }
+    const count = matching.length;
+    if (event.key === 'ArrowDown' && count > 0) {
+      event.preventDefault();
+      highlight((highlighted + 1) % count);
+    } else if (event.key === 'ArrowUp' && count > 0) {
+      event.preventDefault();
+      highlight((highlighted - 1 + count) % count);
+    } else if (event.key === 'Enter' && highlighted >= 0) {
+      event.preventDefault();
+      pick(matching[highlighted].key);
+    }
+  });
+  historyView.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !event.isComposing) {
+      event.preventDefault();
+      closeHistory();
+    }
+  });
 
   sendButton.addEventListener('click', () => {
-    if (submit(input.value)) {
+    if (submit(input.value, undefined, true)) {
       input.value = '';
       updateControls();
     }
   });
   stopButton.addEventListener('click', () => {
-    vscode.postMessage({ type: 'cancel' });
+    post({ type: 'cancel' });
   });
-  input.addEventListener('input', updateControls);
+  input.addEventListener('input', () => {
+    updateControls();
+    reportDraft();
+  });
   input.addEventListener('keydown', (event) => {
     // Enter sends. Shift and Enter starts a new line.
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
@@ -179,24 +315,27 @@
     const message = event.data;
     if (message.type === 'submit') {
       if (!submit(message.text, message.token)) {
-        vscode.postMessage({ type: 'rejected', token: message.token });
+        post({ type: 'rejected', token: message.token });
       }
       return;
     }
-    if (message.type === 'start') {
-      chatKey = message.key;
+    if (message.type === 'show') {
+      // A switch always ends on the chat itself.
+      closeHistory();
+      show(message);
       return;
     }
-    if (message.type === 'newChat') {
-      newChat(message.stashKey, message.key);
-      return;
-    }
-    if (message.type === 'openChat') {
-      openChat(message.key, message.stashKey);
+    if (message.type === 'history') {
+      openHistory(message.items);
       return;
     }
     if (message.type === 'focus') {
-      input.focus();
+      // The composer is wanted, so the chat list, if shown, makes way for it.
+      if (historyView.hidden) {
+        input.focus();
+      } else {
+        closeHistory();
+      }
       return;
     }
     if (current === null || message.id !== current.id) {
@@ -207,11 +346,20 @@
       messages.scrollTop = messages.scrollHeight;
     } else if (message.type === 'end') {
       finish(NOTE_BY_STOP_REASON[message.stopReason], 'note');
+    } else if (message.type === 'error' && message.withdraw === true) {
+      // The message was not sent. It goes back into the composer, and the reason is shown.
+      const { id } = current;
+      withdraw();
+      add('error', message.message);
+      updateControls();
+      reportDraft();
+      input.focus();
+      post({ type: 'shown', id, text: message.message });
     } else if (message.type === 'error') {
       finish(message.message, 'error');
     }
   });
 
   updateControls();
-  vscode.postMessage({ type: 'ready' });
+  post({ type: 'ready' });
 })();

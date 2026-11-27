@@ -3,8 +3,9 @@ import * as vscode from 'vscode';
 import { ChatSession } from './chatSession';
 import {
   ChatPanelController,
+  type ChatSummary,
   type NewChatResult,
-  type ReopenResult,
+  type OpenResult,
   type SubmitResult,
 } from './chatPanel';
 import { ChatViewProvider } from './chatView';
@@ -17,10 +18,12 @@ export interface TestApi {
   sendMessage(text: string): Promise<{ readonly text: string; readonly stopReason: StopReason }>;
   /** Submits a message through the open chat panel, as if it had been typed there. */
   submitInChatView(text: string): Promise<SubmitResult>;
-  /** Starts a new chat in the panel, without the notification. */
+  /** Starts a new chat in the panel. */
   newChat(): Promise<NewChatResult>;
-  /** Reopens a chat in the panel, as Undo or the command does. */
-  reopenChat(key?: number): Promise<ReopenResult>;
+  /** The chats the chat list would show. */
+  chats(): ChatSummary[];
+  /** Opens a chat in the panel, as picking it from the chat list does. */
+  openChat(key: number): Promise<OpenResult>;
 }
 
 async function setApiKey(secrets: vscode.SecretStorage): Promise<void> {
@@ -44,34 +47,24 @@ async function clearApiKey(secrets: vscode.SecretStorage): Promise<void> {
   void vscode.window.showInformationMessage(`The API key for ${provider} is removed.`);
 }
 
-/** Reopens a chat and says so when it cannot be reopened. */
-async function reopenChat(panel: ChatPanelController, key?: number): Promise<void> {
-  let result = await panel.reopen(key);
-  if (result === 'closed') {
-    await vscode.commands.executeCommand('icode.chat.focus');
-    result = 'gone';
-  }
-  if (result === 'none') {
-    void vscode.window.showInformationMessage('There is no previous chat to reopen.');
-  } else if (result === 'gone') {
-    void vscode.window.showWarningMessage('That chat can no longer be reopened.');
+/** Brings the chat panel into view. An opening panel shows the current chat. */
+async function focusPanel(): Promise<void> {
+  await vscode.commands.executeCommand('icode.chat.focus');
+}
+
+/** Starts a new chat. With the panel closed, the panel opens and shows it. */
+async function newChat(panel: ChatPanelController): Promise<void> {
+  await panel.newChat();
+  if (!panel.isOpen) {
+    await focusPanel();
   }
 }
 
-/** Starts a new chat and offers to undo it. */
-async function newChat(panel: ChatPanelController): Promise<void> {
-  const result = await panel.newChat();
-  if (result.kind === 'closed') {
-    // Opening the panel shows an empty chat.
-    await vscode.commands.executeCommand('icode.chat.focus');
-    return;
-  }
-  if (result.kind === 'started') {
-    // Each notification brings back the one conversation it was shown for.
-    const choice = await vscode.window.showInformationMessage('Started a new chat.', 'Undo');
-    if (choice === 'Undo') {
-      await reopenChat(panel, result.previous);
-    }
+/** Shows the chat list in the panel, opening the panel when it is closed. */
+async function showChatHistory(panel: ChatPanelController): Promise<void> {
+  panel.showHistory();
+  if (!panel.isOpen) {
+    await focusPanel();
   }
 }
 
@@ -113,7 +106,7 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
     vscode.commands.registerCommand('icode.setApiKey', () => setApiKey(context.secrets)),
     vscode.commands.registerCommand('icode.clearApiKey', () => clearApiKey(context.secrets)),
     vscode.commands.registerCommand('icode.newChat', () => newChat(panel)),
-    vscode.commands.registerCommand('icode.reopenPreviousChat', () => reopenChat(panel)),
+    vscode.commands.registerCommand('icode.chatHistory', () => showChatHistory(panel)),
   );
 
   if (context.extensionMode !== vscode.ExtensionMode.Test) {
@@ -132,6 +125,7 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
     },
     submitInChatView: (text) => panel.submit(text),
     newChat: () => panel.newChat(),
-    reopenChat: (key) => panel.reopen(key),
+    chats: () => panel.chats(),
+    openChat: (key) => panel.open(key),
   };
 }

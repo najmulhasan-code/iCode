@@ -1,6 +1,6 @@
 import { ClientConnection, type Message, parseMessage } from '@icode/protocol';
 import { describe, expect, it } from 'vitest';
-import { ChatError, ChatSession } from './chatSession';
+import { ChatError, ChatSession, ConversationLostError } from './chatSession';
 import type { CoreSession } from './coreProcess';
 import type { ModelSettings } from './settings';
 
@@ -128,9 +128,6 @@ describe('ChatSession', () => {
     await run();
     state.settings = { provider: 'anthropic', model: 'another-model' };
     await run();
-    // A core that was started again knows neither the model nor the conversation.
-    state.generation = 2;
-    await run();
 
     expect(methods()).toEqual([
       'model/set',
@@ -139,14 +136,35 @@ describe('ChatSession', () => {
       'chat/send',
       'model/set',
       'chat/send',
-      'model/set',
-      'conversation/create',
-      'chat/send',
     ]);
     const conversations = context.sent
       .filter((message) => 'method' in message && message.method === 'chat/send')
       .map((message) => (message as { params: { conversationId: string } }).params.conversationId);
-    expect(conversations).toEqual(['c1', 'c1', 'c1', 'c1']);
+    expect(conversations).toEqual(['c1', 'c1', 'c1']);
+  });
+
+  it('refuses to continue a conversation that a restarted core has lost, and sends nothing', async () => {
+    const context = setup();
+    const { chat, state, fromCore, methods } = context;
+    const first = chat.send('hi', () => undefined);
+    fromCore({ id: await prepare(context), result: { stopReason: 'end' } });
+    await first;
+    // A core that was started again knows neither the model nor the conversation.
+    state.generation = 2;
+
+    const lost = chat.send('and then?', () => undefined);
+    await settle();
+    fromCore({ id: 4, result: {} });
+    await expect(lost).rejects.toBeInstanceOf(ConversationLostError);
+    expect(methods().slice(3)).toEqual(['model/set']);
+
+    // It stays refused until a new conversation is begun.
+    await expect(chat.send('again', () => undefined)).rejects.toBeInstanceOf(ConversationLostError);
+    await chat.setAside();
+    const fresh = chat.send('a new start', () => undefined);
+    fromCore({ id: await prepare(context), result: { stopReason: 'end' } });
+    await expect(fresh).resolves.toBe('end');
+    expect(methods().slice(-2)).toEqual(['conversation/create', 'chat/send']);
   });
 
   it('refuses in plain words when no key is saved, and sends nothing', async () => {
@@ -329,7 +347,7 @@ describe('ChatSession.setAside and resume', () => {
     await first;
     const earlier = await chat.setAside();
 
-    await expect(chat.resume(earlier)).resolves.toBe(true);
+    await chat.resume(earlier);
     const next = chat.send('back again', () => undefined);
     await settle();
     expect(sent.at(-1)).toMatchObject({
@@ -340,7 +358,7 @@ describe('ChatSession.setAside and resume', () => {
     await next;
   });
 
-  it('does not resume a conversation of a core that has stopped since, and changes nothing', async () => {
+  it('resumes a conversation of a core that has stopped since, and refuses the next message', async () => {
     const context = setup();
     const { chat, state, fromCore } = context;
     const first = chat.send('hi', () => undefined);
@@ -349,18 +367,19 @@ describe('ChatSession.setAside and resume', () => {
     const earlier = await chat.setAside();
     state.generation = 2;
 
-    await expect(chat.resume(earlier)).resolves.toBe(false);
-    // The next message begins a new conversation in the new core.
+    await chat.resume(earlier);
     const next = chat.send('hi', () => undefined);
-    fromCore({ id: await prepare(context), result: { stopReason: 'end' } });
-    await next;
-    expect(context.methods().slice(-3)).toEqual(['model/set', 'conversation/create', 'chat/send']);
+    await settle();
+    fromCore({ id: (context.sent.at(-1) as { id: number }).id, result: {} });
+    await expect(next).rejects.toBeInstanceOf(ConversationLostError);
+    expect(context.methods().slice(-1)).toEqual(['model/set']);
   });
 
-  it('resumes "no conversation yet" without starting the core', async () => {
+  it('resumes without asking the core, so a core that cannot start changes nothing yet', async () => {
     const { chat, sent } = setup({ holdCore: true });
 
-    await expect(chat.resume(undefined)).resolves.toBe(true);
+    await chat.resume({ generation: 1, id: 'c1' });
+    await chat.resume(undefined);
     expect(sent).toEqual([]);
   });
 });
