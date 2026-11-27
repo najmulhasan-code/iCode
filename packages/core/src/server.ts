@@ -34,7 +34,7 @@ import {
 } from '@icode/protocol';
 import { randomUUID } from 'node:crypto';
 import { Conversation } from './conversation.js';
-import { type Model, ModelConfigError, ModelError } from './model.js';
+import { type MessagePart, type Model, ModelConfigError, ModelError } from './model.js';
 
 export interface ServerOptions {
   /** Text from the client, in chunks of any size. */
@@ -202,6 +202,26 @@ export async function serve(options: ServerOptions): Promise<void> {
   };
 
   /**
+   * What the conversation keeps of a reply. A declined reply keeps nothing. A
+   * stopped reply keeps only the text written so far, so that a block the
+   * provider had not finished, such as signed thinking, is never sent back.
+   * Any other reply keeps the parts the adapter returned, or its text.
+   */
+  const keptReply = (
+    stopReason: StopReason,
+    written: string,
+    parts: readonly MessagePart[] | undefined,
+  ): readonly MessagePart[] | undefined => {
+    if (stopReason === 'refusal') {
+      return undefined;
+    }
+    if (stopReason === 'cancelled' || parts === undefined) {
+      return [{ kind: 'text', text: written }];
+    }
+    return parts;
+  };
+
+  /**
    * Runs one turn of a conversation to its single answer. It never rejects.
    *
    * What the conversation keeps of the turn is decided before the answer is
@@ -223,6 +243,7 @@ export async function serve(options: ServerOptions): Promise<void> {
     const turn = conversation.begin(text);
     let written = '';
     let stopReason: StopReason | undefined;
+    let parts: readonly MessagePart[] | undefined;
     try {
       const stream = model.stream({ messages: turn.messages, signal: controller.signal });
       const events = stream[Symbol.asyncIterator]();
@@ -248,6 +269,7 @@ export async function serve(options: ServerOptions): Promise<void> {
             }
           } else {
             stopReason = step.value.reason;
+            parts = step.value.parts;
           }
         }
       } finally {
@@ -257,10 +279,10 @@ export async function serve(options: ServerOptions): Promise<void> {
       const result: ChatSendResult = {
         stopReason: controller.signal.aborted ? 'cancelled' : stopReason,
       };
-      turn.end(result.stopReason === 'refusal' ? undefined : written);
+      turn.end(keptReply(result.stopReason, written, parts));
       await reply(request.id, result);
     } catch (error) {
-      turn.end(controller.signal.aborted ? written : undefined);
+      turn.end(controller.signal.aborted ? [{ kind: 'text', text: written }] : undefined);
       if (controller.signal.aborted) {
         const result: ChatSendResult = { stopReason: 'cancelled' };
         await reply(request.id, result);

@@ -1,7 +1,44 @@
-/** One turn of a conversation. */
+/**
+ * A piece of content that belongs to one provider: a block of its reply kept
+ * exactly as received, with where it came from. It goes back only to the same
+ * adapter at the same address, and never to a client or a log.
+ */
+export interface ProviderBlock {
+  /** The adapter that received it, such as `anthropic`. */
+  readonly adapter: string;
+  /** The API address the adapter's client actually used. */
+  readonly endpoint: string;
+  /** The model that wrote this block, when the provider said. */
+  readonly model?: string | undefined;
+  /** The block itself, unchanged. */
+  readonly block: unknown;
+}
+
+/**
+ * A part of a message, in order. Text keeps its original provider block when
+ * it has one, so that metadata such as citations goes back unchanged; its
+ * `text` is what clients and other providers see. Any other provider block,
+ * such as a signed thinking block, is kept whole and is opaque to the rest of
+ * the core.
+ */
+export type MessagePart =
+  | { readonly kind: 'text'; readonly text: string; readonly source?: ProviderBlock | undefined }
+  | { readonly kind: 'provider'; readonly source: ProviderBlock };
+
+/** One message of a conversation: a role and its parts, in order. */
 export interface ChatMessage {
   readonly role: 'user' | 'assistant';
-  readonly text: string;
+  readonly parts: readonly MessagePart[];
+}
+
+/** A message of plain text. */
+export function textMessage(role: ChatMessage['role'], text: string): ChatMessage {
+  return { role, parts: [{ kind: 'text', text }] };
+}
+
+/** The text of a message: its text parts, joined. */
+export function messageText(message: ChatMessage): string {
+  return message.parts.map((part) => (part.kind === 'text' ? part.text : '')).join('');
 }
 
 export interface ModelRequest {
@@ -34,6 +71,11 @@ export type ModelEvent =
       readonly usage?: ModelUsage;
       /** The model that wrote the reply, when the provider names it. */
       readonly model?: string;
+      /**
+       * The whole reply as ordered parts, for the conversation to keep. An
+       * adapter that leaves it out has its reply kept as the text it streamed.
+       */
+      readonly parts?: readonly MessagePart[];
     };
 
 /**

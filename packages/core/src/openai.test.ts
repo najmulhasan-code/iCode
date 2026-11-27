@@ -61,7 +61,7 @@ function sendError(
 async function collect(model: Model): Promise<ModelEvent[]> {
   const events: ModelEvent[] = [];
   const request = {
-    messages: [{ role: 'user', text: 'hi' }] as const,
+    messages: [{ role: 'user', parts: [{ kind: 'text', text: 'hi' }] }] as const,
     signal: new AbortController().signal,
   };
   for await (const event of model.stream(request)) {

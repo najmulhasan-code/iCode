@@ -17,6 +17,12 @@ function writeToStdout(text: string): Promise<void> {
   });
 }
 
+/** Writes a line of diagnostics to standard error, which the client keeps in its log. */
+function writeLog(text: string): void {
+  process.stderr.write(`${text}
+`);
+}
+
 /** Builds the adapter for the provider the client chose. */
 function createModel(params: SetModelParams): Model {
   const shared = {
@@ -27,6 +33,7 @@ function createModel(params: SetModelParams): Model {
     return createAnthropicModel({
       ...shared,
       ...(params.model === undefined ? {} : { model: params.model }),
+      log: writeLog,
     });
   }
   if (params.model === undefined) {

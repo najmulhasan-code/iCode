@@ -5,13 +5,13 @@ describe('Conversation', () => {
   it('sends the kept turns followed by the new message', () => {
     const conversation = new Conversation();
     const first = conversation.begin('first');
-    expect(first.messages).toEqual([{ role: 'user', text: 'first' }]);
-    first.end('one');
+    expect(first.messages).toEqual([{ role: 'user', parts: [{ kind: 'text', text: 'first' }] }]);
+    first.end([{ kind: 'text', text: 'one' }]);
 
     expect(conversation.begin('second').messages).toEqual([
-      { role: 'user', text: 'first' },
-      { role: 'assistant', text: 'one' },
-      { role: 'user', text: 'second' },
+      { role: 'user', parts: [{ kind: 'text', text: 'first' }] },
+      { role: 'assistant', parts: [{ kind: 'text', text: 'one' }] },
+      { role: 'user', parts: [{ kind: 'text', text: 'second' }] },
     ]);
   });
 
@@ -20,7 +20,9 @@ describe('Conversation', () => {
     conversation.begin('first').end();
 
     expect(conversation.messages).toEqual([]);
-    expect(conversation.begin('again').messages).toEqual([{ role: 'user', text: 'again' }]);
+    expect(conversation.begin('again').messages).toEqual([
+      { role: 'user', parts: [{ kind: 'text', text: 'again' }] },
+    ]);
   });
 
   it.each([
@@ -28,7 +30,7 @@ describe('Conversation', () => {
     ['only spaces and line breaks', ' \n\t'],
   ])('keeps nothing of a turn whose reply is %s', (_name, reply) => {
     const conversation = new Conversation();
-    conversation.begin('first').end(reply);
+    conversation.begin('first').end([{ kind: 'text', text: reply }]);
 
     expect(conversation.messages).toEqual([]);
   });
@@ -39,49 +41,49 @@ describe('Conversation', () => {
     const turn = conversation.begin('first');
     expect(conversation.busy).toBe(true);
     expect(() => conversation.begin('second')).toThrow('already in progress');
-    turn.end('one');
+    turn.end([{ kind: 'text', text: 'one' }]);
     expect(conversation.busy).toBe(false);
   });
 
   it('ends a turn once: later calls change nothing', () => {
     const conversation = new Conversation();
     const turn = conversation.begin('first');
-    turn.end('one');
-    turn.end('two');
+    turn.end([{ kind: 'text', text: 'one' }]);
+    turn.end([{ kind: 'text', text: 'two' }]);
     turn.end();
 
     expect(conversation.messages).toEqual([
-      { role: 'user', text: 'first' },
-      { role: 'assistant', text: 'one' },
+      { role: 'user', parts: [{ kind: 'text', text: 'first' }] },
+      { role: 'assistant', parts: [{ kind: 'text', text: 'one' }] },
     ]);
   });
 
   it('does not let a turn that has ended end the turn after it', () => {
     const conversation = new Conversation();
     const first = conversation.begin('first');
-    first.end('one');
+    first.end([{ kind: 'text', text: 'one' }]);
     const second = conversation.begin('second');
     // Cleanup of the first turn arrives late.
     first.end();
-    first.end('stray');
+    first.end([{ kind: 'text', text: 'stray' }]);
 
     expect(conversation.busy).toBe(true);
     expect(() => conversation.begin('third')).toThrow('already in progress');
-    second.end('two');
+    second.end([{ kind: 'text', text: 'two' }]);
     expect(conversation.messages).toEqual([
-      { role: 'user', text: 'first' },
-      { role: 'assistant', text: 'one' },
-      { role: 'user', text: 'second' },
-      { role: 'assistant', text: 'two' },
+      { role: 'user', parts: [{ kind: 'text', text: 'first' }] },
+      { role: 'assistant', parts: [{ kind: 'text', text: 'one' }] },
+      { role: 'user', parts: [{ kind: 'text', text: 'second' }] },
+      { role: 'assistant', parts: [{ kind: 'text', text: 'two' }] },
     ]);
   });
 
   it('does not let a sent list change when later turns are kept', () => {
     const conversation = new Conversation();
     const first = conversation.begin('first');
-    first.end('one');
+    first.end([{ kind: 'text', text: 'one' }]);
     conversation.begin('second');
 
-    expect(first.messages).toEqual([{ role: 'user', text: 'first' }]);
+    expect(first.messages).toEqual([{ role: 'user', parts: [{ kind: 'text', text: 'first' }] }]);
   });
 });

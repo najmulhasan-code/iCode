@@ -22,7 +22,7 @@ export interface ContractHarness {
 async function collect(model: Model, signal?: AbortSignal): Promise<ModelEvent[]> {
   const events: ModelEvent[] = [];
   const request = {
-    messages: [{ role: 'user', text: 'hi' }] as const,
+    messages: [{ role: 'user', parts: [{ kind: 'text', text: 'hi' }] }] as const,
     signal: signal ?? new AbortController().signal,
   };
   for await (const event of model.stream(request)) {
@@ -116,7 +116,7 @@ export function describeModelContract(name: string, harness: ContractHarness): v
       const controller = new AbortController();
       const events: ModelEvent[] = [];
       const request = {
-        messages: [{ role: 'user', text: 'hi' }] as const,
+        messages: [{ role: 'user', parts: [{ kind: 'text', text: 'hi' }] }] as const,
         signal: controller.signal,
       };
       for await (const event of harness.createModel(api.url, 0).stream(request)) {
