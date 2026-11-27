@@ -91,8 +91,8 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
   routes.chat = session;
   const panel = new ChatPanelController(session, {
     actions: {
-      copy: (text) => {
-        void vscode.env.clipboard.writeText(text);
+      copy: async (text) => {
+        await vscode.env.clipboard.writeText(text);
       },
       // The controller passes only links that are full https or mailto addresses.
       openLink: (url) => {

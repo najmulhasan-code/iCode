@@ -1,13 +1,14 @@
 import {
   type KeyboardEvent,
   type ReactNode,
+  type Ref,
   useEffect,
   useLayoutEffect,
   useRef,
-  useState,
   useSyncExternalStore,
 } from 'react';
 import type { ChatEntry } from '../../src/panelProtocol';
+import { CopyButton } from './copy';
 import { Markdown } from './markdown';
 import { type ChatState, type ChatStore, NOTE_BY_STOP_REASON } from './store';
 
@@ -67,6 +68,26 @@ function Thread({ store, state }: { store: ChatStore; state: ChatState }): React
       element.scrollTop = element.scrollHeight;
     }
   });
+  // Once the outcome of a request is drawn, the view reports what it shows.
+  // It waits two frames, so that parts drawn after the first commit, such as
+  // code blocks, are included.
+  const reported = useRef<HTMLElement>(null);
+  const { toReport } = state;
+  useEffect(() => {
+    if (toReport === null) {
+      return undefined;
+    }
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => {
+        store.reportShown(reported.current?.textContent ?? '');
+      });
+    });
+    return () => {
+      cancelAnimationFrame(first);
+      cancelAnimationFrame(second);
+    };
+  }, [store, toReport]);
   const { pending } = state;
   return (
     <div
@@ -81,7 +102,12 @@ function Thread({ store, state }: { store: ChatStore; state: ChatState }): React
       }}
     >
       {state.entries.map((entry, index) => (
-        <Entry key={index} entry={entry} store={store} />
+        <Entry
+          key={index}
+          entry={entry}
+          store={store}
+          shownRef={toReport?.index === index ? reported : undefined}
+        />
       ))}
       {pending !== null && (
         <>
@@ -95,6 +121,7 @@ function Thread({ store, state }: { store: ChatStore; state: ChatState }): React
               onOpenLink={(url) => {
                 store.openLink(url);
               }}
+              onCopy={(text) => store.copy(text)}
             />
           )}
         </>
@@ -103,24 +130,43 @@ function Thread({ store, state }: { store: ChatStore; state: ChatState }): React
   );
 }
 
-function Entry({ entry, store }: { entry: ChatEntry; store: ChatStore }): ReactNode {
+function Entry({
+  entry,
+  store,
+  shownRef,
+}: {
+  entry: ChatEntry;
+  store: ChatStore;
+  /** Set on the entry that shows the outcome of the request that just ended. */
+  shownRef?: Ref<HTMLElement> | undefined;
+}): ReactNode {
   if (entry.kind === 'user') {
     return <UserMessage text={entry.text} />;
   }
   if (entry.kind === 'error') {
-    return <p className="text-[var(--vscode-errorForeground)]">{entry.text}</p>;
+    return (
+      <p
+        ref={shownRef as Ref<HTMLParagraphElement>}
+        className="text-[var(--vscode-errorForeground)]"
+      >
+        {entry.text}
+      </p>
+    );
   }
   const note = entry.stopReason === undefined ? undefined : NOTE_BY_STOP_REASON[entry.stopReason];
   return (
     <div className="group flex flex-col gap-1">
       {entry.text !== '' && (
-        <Markdown
-          text={entry.text}
-          streaming={false}
-          onOpenLink={(url) => {
-            store.openLink(url);
-          }}
-        />
+        <div ref={shownRef as Ref<HTMLDivElement>}>
+          <Markdown
+            text={entry.text}
+            streaming={false}
+            onCopy={(text) => store.copy(text)}
+            onOpenLink={(url) => {
+              store.openLink(url);
+            }}
+          />
+        </div>
       )}
       {note !== undefined && (
         <p className="text-[var(--vscode-descriptionForeground)] italic">{note}</p>
@@ -152,28 +198,9 @@ function Working(): ReactNode {
 
 /** Shown on hover under a finished reply. */
 function ReplyActions({ text, store }: { text: string; store: ChatStore }): ReactNode {
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    if (!copied) {
-      return undefined;
-    }
-    const timer = setTimeout(() => {
-      setCopied(false);
-    }, 1500);
-    return () => {
-      clearTimeout(timer);
-    };
-  }, [copied]);
   return (
     <div className="flex gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
-      <IconButton
-        label={copied ? 'Copied' : 'Copy reply'}
-        icon={copied ? 'check' : 'copy'}
-        onClick={() => {
-          store.copy(text);
-          setCopied(true);
-        }}
-      />
+      <CopyButton label="Copy reply" onCopy={() => store.copy(text)} />
     </div>
   );
 }
@@ -282,6 +309,16 @@ function History({ store, state }: { store: ChatStore; state: ChatState }): Reac
   useEffect(() => {
     search.current?.focus();
   }, []);
+  // The highlighted row stays in view as the arrow keys move it, while the
+  // cursor stays in the search box.
+  const highlightedKey = history?.matching[history.highlighted]?.key;
+  useEffect(() => {
+    if (highlightedKey !== undefined) {
+      document
+        .getElementById(`history-item-${String(highlightedKey)}`)
+        ?.scrollIntoView({ block: 'nearest' });
+    }
+  }, [highlightedKey]);
   if (history === null) {
     return null;
   }

@@ -77,7 +77,29 @@ describe('the chat page', () => {
       { kind: 'user', text: 'hello' },
       { kind: 'reply', text: '**Hi** there', stopReason: 'max_tokens' },
     ]);
-    expect(page.posted.at(-1)).toEqual({ type: 'shown', id, text: '**Hi** there' });
+    // What was displayed is reported by the view, once it has drawn the reply.
+    expect(page.posted.some((message) => message.type === 'shown')).toBe(false);
+    expect(page.state().toReport).toEqual({ id, index: 1 });
+    page.store.reportShown('Hi there');
+    expect(page.posted.at(-1)).toEqual({ type: 'shown', id, text: 'Hi there' });
+    expect(page.state().toReport).toBeNull();
+    page.store.reportShown('again');
+    expect(page.posted.filter((message) => message.type === 'shown')).toHaveLength(1);
+  });
+
+  it('reports an outcome the view has not drawn yet, from its text, before showing another chat', () => {
+    const page = open();
+    page.show(1);
+    const { id } = page.send('hello');
+    page.store.receive({ type: 'error', id, message: 'The provider could not be reached.' });
+    page.show(2);
+
+    expect(page.posted).toContainEqual({
+      type: 'shown',
+      id,
+      text: 'The provider could not be reached.',
+    });
+    expect(page.state().toReport).toBeNull();
   });
 
   it('ignores answers to any other message', () => {
@@ -154,7 +176,7 @@ describe('the chat page', () => {
     expect(page.state().draft).toBe('hello');
     expect(page.state().entries).toEqual([{ kind: 'error', text: 'The chat is being switched.' }]);
     expect(page.posted).toContainEqual({ type: 'draft', chat: 1, text: 'hello', returned: [id] });
-    expect(page.posted.at(-1)).toEqual({ type: 'shown', id, text: 'The chat is being switched.' });
+    expect(page.state().toReport).toEqual({ id, index: 0 });
   });
 
   it('tells the extension when it takes back or refuses a message a test submitted', () => {
@@ -169,17 +191,31 @@ describe('the chat page', () => {
     expect(page.posted).toContainEqual({ type: 'rejected', token: 5 });
   });
 
-  it('asks the extension to stop, to copy, and to open a link', () => {
+  it('asks the extension to stop and to open a link', () => {
     const page = open();
     page.store.stop();
-    page.store.copy('some text');
     page.store.openLink('https://example.com/');
 
     expect(page.posted).toEqual([
       { type: 'cancel' },
-      { type: 'copy', text: 'some text' },
       { type: 'openLink', url: 'https://example.com/' },
     ]);
+  });
+
+  it('copies through the extension and learns whether each copy succeeded', async () => {
+    const page = open();
+    const first = page.store.copy('one');
+    const second = page.store.copy('two');
+    expect(page.posted).toEqual([
+      { type: 'copy', id: 1, text: 'one' },
+      { type: 'copy', id: 2, text: 'two' },
+    ]);
+    page.store.receive({ type: 'copied', id: 2, ok: false });
+    page.store.receive({ type: 'copied', id: 1, ok: true });
+    page.store.receive({ type: 'copied', id: 9, ok: true });
+
+    await expect(first).resolves.toBe(true);
+    await expect(second).resolves.toBe(false);
   });
 
   it('ignores messages that are not objects', () => {

@@ -54,4 +54,6 @@ export type PanelMessage =
   /** Show the chat list in the panel, in place of the chat. */
   | { readonly type: 'history'; readonly items: readonly ChatListItem[] }
   /** Move the cursor to the composer. */
-  | { readonly type: 'focus' };
+  | { readonly type: 'focus' }
+  /** Whether the text of copy request `id` reached the clipboard. */
+  | { readonly type: 'copied'; readonly id: number; readonly ok: boolean };

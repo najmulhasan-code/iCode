@@ -36,6 +36,11 @@ export interface ChatState {
   readonly history: HistoryState | null;
   /** Grows each time the composer should take the cursor. */
   readonly focusComposer: number;
+  /**
+   * A request that has just ended, and the entry that shows its outcome. The
+   * view reports what that entry displays once it has drawn it.
+   */
+  readonly toReport: { readonly id: number; readonly index: number } | null;
 }
 
 /** A message from the page to the extension. The bridge adds the page's load number. */
@@ -48,6 +53,7 @@ const INITIAL: ChatState = {
   draft: '',
   history: null,
   focusComposer: 0,
+  toReport: null,
 };
 
 /** Text taken back from a request goes before what the composer already holds. */
@@ -78,6 +84,8 @@ export class ChatStore {
   #nextId = 1;
   /** Numbers of messages put back into the composer since the last report. */
   #returned: number[] = [];
+  readonly #copies = new Map<number, (ok: boolean) => void>();
+  #nextCopy = 1;
 
   constructor(post: (message: PageMessage) => void) {
     this.#post = post;
@@ -129,6 +137,12 @@ export class ChatStore {
       case 'error':
         this.#answer(data);
         return;
+      case 'copied': {
+        const resolve = this.#copies.get(data.id);
+        this.#copies.delete(data.id);
+        resolve?.(data.ok);
+        return;
+      }
     }
   }
 
@@ -150,9 +164,26 @@ export class ChatStore {
     this.#post({ type: 'cancel' });
   }
 
-  /** Copies text through the extension, which owns the clipboard. */
-  copy(text: string): void {
-    this.#post({ type: 'copy', text });
+  /**
+   * Copies text through the extension, which owns the clipboard. Resolves
+   * with whether the text reached the clipboard.
+   */
+  copy(text: string): Promise<boolean> {
+    const id = this.#nextCopy;
+    this.#nextCopy += 1;
+    return new Promise((resolve) => {
+      this.#copies.set(id, resolve);
+      this.#post({ type: 'copy', id, text });
+    });
+  }
+
+  /** The view tells the extension what it displayed for the request that just ended. */
+  reportShown(text: string): void {
+    const { toReport } = this.#state;
+    if (toReport !== null) {
+      this.#set({ toReport: null });
+      this.#post({ type: 'shown', id: toReport.id, text });
+    }
   }
 
   /** Asks the extension to open a link. The extension checks it again. */
@@ -202,21 +233,26 @@ export class ChatStore {
         { kind: 'user', text: pending.text },
         { kind: 'reply', text: pending.reply, stopReason: data.stopReason },
       ];
-      this.#set({ pending: null, entries, focusComposer: this.#state.focusComposer + 1 });
-      this.#post({ type: 'shown', id: data.id, text: pending.reply });
+      this.#set({
+        pending: null,
+        entries,
+        focusComposer: this.#state.focusComposer + 1,
+        toReport: { id: data.id, index: entries.length - 1 },
+      });
       return;
     }
     if (data.withdraw === true) {
       // The message was not sent. It goes back into the composer, and the reason is shown.
       this.#returned.push(pending.id);
+      const entries: ChatEntry[] = [...this.#state.entries, { kind: 'error', text: data.message }];
       this.#set({
         pending: null,
         draft: joinDraft(pending.text, this.#state.draft),
-        entries: [...this.#state.entries, { kind: 'error', text: data.message }],
+        entries,
         focusComposer: this.#state.focusComposer + 1,
+        toReport: { id: data.id, index: entries.length - 1 },
       });
       this.#reportDraft();
-      this.#post({ type: 'shown', id: data.id, text: data.message });
       return;
     }
     const entries: ChatEntry[] = [...this.#state.entries, { kind: 'user', text: pending.text }];
@@ -224,8 +260,12 @@ export class ChatStore {
       entries.push({ kind: 'reply', text: pending.reply });
     }
     entries.push({ kind: 'error', text: data.message });
-    this.#set({ pending: null, entries, focusComposer: this.#state.focusComposer + 1 });
-    this.#post({ type: 'shown', id: data.id, text: data.message });
+    this.#set({
+      pending: null,
+      entries,
+      focusComposer: this.#state.focusComposer + 1,
+      toReport: { id: data.id, index: entries.length - 1 },
+    });
   }
 
   /**
@@ -246,6 +286,12 @@ export class ChatStore {
   }
 
   #show(data: Extract<PanelMessage, { type: 'show' }>): void {
+    // An outcome the view has not reported yet is reported from its text,
+    // because the view is about to draw another chat.
+    const { toReport } = this.#state;
+    if (toReport !== null) {
+      this.reportShown(this.#state.entries[toReport.index]?.text ?? '');
+    }
     // A switch always ends on the chat itself.
     this.#set({ history: null });
     this.#withdrawPending();

@@ -53,8 +53,8 @@ const MAX_COPY_LENGTH = 1_000_000;
 
 /** What the controller may do in the editor on the page's behalf. */
 export interface PanelActions {
-  /** Puts text on the clipboard. */
-  copy(text: string): void;
+  /** Puts text on the clipboard. Rejects when it could not. */
+  copy(text: string): Promise<void>;
   /** Opens a web or mail address that has passed the link check. */
   openLink(url: string): void;
 }
@@ -261,10 +261,12 @@ export class ChatPanelController {
       this.#handleDraft(message);
     } else if (message.type === 'switched') {
       this.#handleSwitched(message);
-    } else if (message.type === 'copy' && typeof message.text === 'string') {
-      if (message.text.length <= MAX_COPY_LENGTH) {
-        this.#actions?.copy(message.text);
-      }
+    } else if (
+      message.type === 'copy' &&
+      typeof message.id === 'number' &&
+      typeof message.text === 'string'
+    ) {
+      this.#copy(port, message.id, message.text);
     } else if (message.type === 'openLink' && typeof message.url === 'string') {
       // The page checked the link when it drew it. It is checked again here,
       // because the page is not trusted.
@@ -280,6 +282,28 @@ export class ChatPanelController {
     } else if (message.type === 'rejected' && typeof message.token === 'number') {
       this.#settle(message.token, { error: 'The chat panel did not accept the message.' });
     }
+  }
+
+  /** Copies text for the page and tells it whether the copy succeeded. */
+  #copy(port: PanelPort, id: number, text: string): void {
+    const answer = (ok: boolean): void => {
+      if (this.#port === port) {
+        port.post({ type: 'copied', id, ok });
+      }
+    };
+    const actions = this.#actions;
+    if (actions === undefined || text.length > MAX_COPY_LENGTH) {
+      answer(false);
+      return;
+    }
+    actions.copy(text).then(
+      () => {
+        answer(true);
+      },
+      () => {
+        answer(false);
+      },
+    );
   }
 
   /**

@@ -5,7 +5,12 @@ import { Markdown } from './markdown';
 /** Renders a reply as the page would, to its markup. */
 function render(text: string): string {
   return renderToStaticMarkup(
-    <Markdown text={text} streaming={false} onOpenLink={() => undefined} />,
+    <Markdown
+      text={text}
+      streaming={false}
+      onOpenLink={() => undefined}
+      onCopy={() => Promise.resolve(true)}
+    />,
   );
 }
 
@@ -21,11 +26,23 @@ describe('a reply in the panel', () => {
     expect(html).not.toContain('**');
   });
 
+  it('keeps code inside a sentence inline, with no block and no copy button', () => {
+    const html = render('Use the `json` module.\n\n- `json.load` reads a file.');
+
+    expect(html).toMatch(/<p>Use the <code[^>]*>json<\/code> module\.<\/p>/);
+    expect(html).toMatch(/<code[^>]*>json\.load<\/code> reads a file\./);
+    expect(html).not.toContain('data-streamdown="code-block"');
+    expect(html).not.toContain('Copy code');
+  });
+
   it('shows a code block with its code', () => {
     const html = render('```ts\nconst x = 1 < 2;\n```');
 
     expect(html).toContain('const x = 1 &lt; 2;');
     expect(html).toContain('data-streamdown="code-block"');
+    // iCode's own copy button, on the confirmed copy path.
+    expect(html).toContain('aria-label="Copy code"');
+    expect(html).not.toContain('data-streamdown="code-block-copy-button"');
   });
 
   it('shows raw HTML as text, never as elements', () => {
@@ -47,10 +64,13 @@ describe('a reply in the panel', () => {
     expect(render(text)).not.toMatch(/<img/i);
   });
 
-  it('keeps a full https link as a link', () => {
+  it('keeps a full https link as a link control with no address for the page to follow', () => {
     const html = render('See [the docs](https://example.com/docs).');
 
-    expect(html).toContain('href="https://example.com/docs"');
+    expect(html).toContain('role="link"');
+    expect(html).toContain('title="https://example.com/docs"');
+    expect(html).not.toMatch(/href=/i);
+    expect(html).not.toMatch(/<a[\s>]/i);
   });
 
   it.each([
@@ -67,6 +87,7 @@ describe('a reply in the panel', () => {
 
     expect(html).not.toMatch(/<a /i);
     expect(html).not.toMatch(/href=/i);
+    expect(html).not.toContain('role="link"');
     expect(html).toContain('click');
   });
 });

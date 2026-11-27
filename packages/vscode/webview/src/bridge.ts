@@ -17,17 +17,5 @@ export function createBridge(): { post: (message: PageMessage) => void } {
   const post = (message: PageMessage): void => {
     vscode.postMessage({ ...message, load });
   };
-  // Copy buttons write through the extension, which owns the clipboard.
-  // Whether the webview's own clipboard works depends on the editor and the
-  // platform; VS Code's clipboard API always does.
-  if ('clipboard' in navigator) {
-    Object.defineProperty(navigator.clipboard, 'writeText', {
-      configurable: true,
-      value: (text: string): Promise<void> => {
-        post({ type: 'copy', text });
-        return Promise.resolve();
-      },
-    });
-  }
   return { post };
 }

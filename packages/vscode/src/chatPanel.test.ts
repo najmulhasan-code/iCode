@@ -1004,13 +1004,16 @@ describe('the chat list in the panel', () => {
 });
 
 describe('copying and links asked for by the page', () => {
-  async function withActions() {
+  async function withActions(copy: (text: string) => Promise<void> = () => Promise.resolve()) {
     const copied: string[] = [];
     const opened: string[] = [];
     const chat = fakeChat();
     const controller = new ChatPanelController(chat.backend, {
       actions: {
-        copy: (text) => copied.push(text),
+        copy: (text) => {
+          copied.push(text);
+          return copy(text);
+        },
         openLink: (url) => opened.push(url),
       },
     });
@@ -1020,12 +1023,30 @@ describe('copying and links asked for by the page', () => {
     return { controller, port, copied, opened };
   }
 
-  it('copies text through the editor', async () => {
+  it('copies text through the editor and says that it did', async () => {
     const { controller, port, copied } = await withActions();
-    controller.handle(port, { type: 'copy', text: 'const x = 1;' });
-    controller.handle(port, { type: 'copy', text: 42 });
+    controller.handle(port, { type: 'copy', id: 1, text: 'const x = 1;' });
+    controller.handle(port, { type: 'copy', id: 2, text: 42 });
+    controller.handle(port, { type: 'copy', text: 'no number' });
+    await settle();
 
     expect(copied).toEqual(['const x = 1;']);
+    expect(port.posted).toEqual([{ type: 'copied', id: 1, ok: true }]);
+  });
+
+  it('says so when the clipboard refuses, or the text is too long', async () => {
+    const { controller, port, copied } = await withActions(() =>
+      Promise.reject(new Error('no clipboard')),
+    );
+    controller.handle(port, { type: 'copy', id: 1, text: 'x' });
+    controller.handle(port, { type: 'copy', id: 2, text: 'y'.repeat(1_000_001) });
+    await settle();
+
+    expect(copied).toEqual(['x']);
+    expect(port.posted).toEqual([
+      { type: 'copied', id: 2, ok: false },
+      { type: 'copied', id: 1, ok: false },
+    ]);
   });
 
   it('opens only links that pass the check again, whatever the page sent', async () => {
@@ -1047,7 +1068,7 @@ describe('copying and links asked for by the page', () => {
   it('ignores both from a page that is gone', async () => {
     const { controller, port, copied, opened } = await withActions();
     controller.detach(port);
-    controller.handle(port, { type: 'copy', text: 'x' });
+    controller.handle(port, { type: 'copy', id: 1, text: 'x' });
     controller.handle(port, { type: 'openLink', url: 'https://example.com' });
 
     expect(copied).toEqual([]);

@@ -112,24 +112,6 @@ body {
   background: transparent;
 }
 
-/* The copy icon sits in the header and shows while the block is hovered or focused. */
-.icode-markdown [data-streamdown='code-block-actions'] {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  backdrop-filter: none;
-  opacity: 0;
-  transition: opacity 120ms;
-  position: relative;
-  top: -4px;
-  right: -2px;
-}
-
-.icode-markdown [data-streamdown='code-block']:hover [data-streamdown='code-block-actions'],
-.icode-markdown [data-streamdown='code-block']:focus-within [data-streamdown='code-block-actions'] {
-  opacity: 1;
-}
-
 /* A table is one box. */
 .icode-markdown [data-streamdown='table-wrapper'] {
   gap: 0;
@@ -153,6 +135,43 @@ body {
 .vscode-high-contrast .icode-markdown pre *,
 .vscode-high-contrast-light .icode-markdown pre * {
   color: var(--vscode-editor-foreground) !important;
+}
+
+/* A link is a control that asks the extension to open it. */
+.icode-link {
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+  text-underline-offset: 2px;
+}
+
+.icode-link:hover {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+  text-decoration: underline;
+}
+
+.icode-link:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+/* iCode's copy button sits in the code block's header and shows on hover. */
+.icode-code {
+  position: relative;
+}
+
+.icode-code > .copy-button {
+  position: absolute;
+  top: 1px;
+  right: 4px;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+
+.icode-code:hover > .copy-button,
+.icode-code:focus-within > .copy-button,
+.icode-code > .copy-button[aria-label='Copied'],
+.icode-code > .copy-button[aria-label='Could not copy'] {
+  opacity: 1;
 }
 
 /* ------------------------------------------------------------ controls */

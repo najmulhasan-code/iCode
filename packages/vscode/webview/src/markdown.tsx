@@ -1,11 +1,13 @@
 import { code } from '@streamdown/code';
-import type { ReactNode } from 'react';
+import { type ReactNode, isValidElement } from 'react';
 import {
   type Components,
   Streamdown,
   type StreamdownProps,
+  defaultComponents,
   defaultRehypePlugins,
 } from 'streamdown';
+import { CopyButton } from './copy';
 import { validateLink } from '../../src/links';
 
 /**
@@ -19,8 +21,12 @@ import { validateLink } from '../../src/links';
  * - Only these elements survive. Images, forms, media, SVG and maths do not.
  *   The plain span is there because the hardener turns a blocked link into a
  *   span holding the link's text, and that text must stay readable.
- * - A link survives only when the shared link check accepts it, and a click
- *   never navigates the page: it asks the extension, which checks again.
+ * - A link survives only when the shared link check accepts it. It is drawn
+ *   as a link-styled control without an address to follow, so neither the
+ *   page nor the editor's own link handling can open it; a click asks the
+ *   extension, which checks the link again.
+ * - Code blocks get iCode's own copy button, which copies through the
+ *   extension and shows success only once the extension confirms it.
  */
 export const ALLOWED_ELEMENTS = [
   'p',
@@ -97,28 +103,68 @@ export interface MarkdownProps {
   readonly text: string;
   readonly streaming: boolean;
   readonly onOpenLink: (url: string) => void;
+  /** Copies text, and resolves with whether it reached the clipboard. */
+  readonly onCopy: (text: string) => Promise<boolean>;
 }
 
-export function Markdown({ text, streaming, onOpenLink }: MarkdownProps): ReactNode {
+/** The plain text inside React children, such as the source of a code block. */
+export function textOf(node: ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') {
+    return String(node);
+  }
+  if (Array.isArray(node)) {
+    return node.map((child: ReactNode) => textOf(child)).join('');
+  }
+  if (isValidElement<{ children?: ReactNode }>(node)) {
+    return textOf(node.props.children);
+  }
+  return '';
+}
+
+const DefaultCode = defaultComponents.code;
+
+export function Markdown({ text, streaming, onOpenLink, onCopy }: MarkdownProps): ReactNode {
   const components: Components = {
-    // Nothing the model wrote is spread onto the element: only the checked address.
+    // Nothing the model wrote is spread onto the control: only the checked address.
     a: ({ href, children }) => {
       const url = typeof href === 'string' ? validateLink(href) : '';
       if (url === '') {
         return <span>{children}</span>;
       }
+      const open = (event: { preventDefault(): void; stopPropagation(): void }): void => {
+        event.preventDefault();
+        event.stopPropagation();
+        onOpenLink(url);
+      };
       return (
-        <a
-          href={url}
+        <span
+          role="link"
+          tabIndex={0}
           title={url}
-          className="text-[var(--vscode-textLink-foreground)] underline-offset-2 hover:underline"
-          onClick={(event) => {
-            event.preventDefault();
-            onOpenLink(url);
+          className="icode-link"
+          onClick={open}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              open(event);
+            }
           }}
         >
           {children}
-        </a>
+        </span>
+      );
+    },
+    // Code inside a sentence stays plain inline code. Streamdown sends it to the
+    // block renderer below unless it has its own component.
+    inlineCode: ({ children }) => <code className="icode-inline-code">{children}</code>,
+    // Streamdown's code block, with iCode's copy button on top of it.
+    code: (props) => {
+      return (
+        <div className="icode-code">
+          <DefaultCode {...props} />
+          {!streaming && (
+            <CopyButton label="Copy code" onCopy={() => onCopy(textOf(props.children))} />
+          )}
+        </div>
       );
     },
   };
@@ -134,12 +180,7 @@ export function Markdown({ text, streaming, onOpenLink }: MarkdownProps): ReactN
       skipHtml={false}
       urlTransform={transformUrl}
       components={components}
-      controls={{
-        code: { copy: true, download: false },
-        table: false,
-        mermaid: false,
-        image: false,
-      }}
+      controls={{ code: false, table: false, mermaid: false, image: false }}
       linkSafety={{ enabled: false }}
       plugins={{ code }}
       shikiTheme={SHIKI_THEMES}
