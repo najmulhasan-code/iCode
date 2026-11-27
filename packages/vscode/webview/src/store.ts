@@ -37,10 +37,18 @@ export interface ChatState {
   /** Grows each time the composer should take the cursor. */
   readonly focusComposer: number;
   /**
-   * A request that has just ended, and the entry that shows its outcome. The
-   * view reports what that entry displays once it has drawn it.
+   * Requests that have ended and whose outcome the view has yet to report, each
+   * with the entry that shows it. The view reports what each entry displays once
+   * it has drawn it. Each is settled once: with the text read from the page, or
+   * as not displayed when no view could draw it.
    */
-  readonly toReport: { readonly id: number; readonly index: number } | null;
+  readonly toReport: readonly Outcome[];
+}
+
+/** A request whose outcome is drawn by the entry at `index`. */
+export interface Outcome {
+  readonly id: number;
+  readonly index: number;
 }
 
 /** A message from the page to the extension. The bridge adds the page's load number. */
@@ -53,7 +61,7 @@ const INITIAL: ChatState = {
   draft: '',
   history: null,
   focusComposer: 0,
-  toReport: null,
+  toReport: [],
 };
 
 /** Text taken back from a request goes before what the composer already holds. */
@@ -177,13 +185,47 @@ export class ChatStore {
     });
   }
 
-  /** The view tells the extension what it displayed for the request that just ended. */
-  reportShown(text: string): void {
-    const { toReport } = this.#state;
-    if (toReport !== null) {
-      this.#set({ toReport: null });
-      this.#post({ type: 'shown', id: toReport.id, text });
+  /** The view tells the extension what it displayed for a request that ended. */
+  reportShown(id: number, text: string): void {
+    if (this.#settleOutcome(id)) {
+      this.#post({ type: 'shown', id, text });
     }
+  }
+
+  /** The view could not draw the outcome of a request. */
+  reportNotShown(id: number): void {
+    if (this.#settleOutcome(id)) {
+      this.#post({ type: 'notShown', id });
+    }
+  }
+
+  /** Removes an outcome from those awaiting a report. Returns false if it was not there. */
+  #settleOutcome(id: number): boolean {
+    const toReport = this.#state.toReport.filter((outcome) => outcome.id !== id);
+    if (toReport.length === this.#state.toReport.length) {
+      return false;
+    }
+    this.#set({ toReport });
+    return true;
+  }
+
+  /** Settles every outcome still awaiting a report as not displayed. */
+  #abandonOutcomes(): void {
+    for (const { id } of this.#state.toReport) {
+      this.reportNotShown(id);
+    }
+  }
+
+  /**
+   * Adds an outcome for the view to report. With the chat list in its place,
+   * no view can draw it, so it is settled as not displayed at once.
+   */
+  #expectOutcome(id: number, index: number): readonly Outcome[] {
+    if (this.#state.history !== null) {
+      this.#post({ type: 'notShown', id });
+      return this.#state.toReport;
+    }
+    return [...this.#state.toReport, { id, index }];
   }
 
   /** Asks the extension to open a link. The extension checks it again. */
@@ -237,7 +279,7 @@ export class ChatStore {
         pending: null,
         entries,
         focusComposer: this.#state.focusComposer + 1,
-        toReport: { id: data.id, index: entries.length - 1 },
+        toReport: this.#expectOutcome(data.id, entries.length - 1),
       });
       return;
     }
@@ -250,7 +292,7 @@ export class ChatStore {
         draft: joinDraft(pending.text, this.#state.draft),
         entries,
         focusComposer: this.#state.focusComposer + 1,
-        toReport: { id: data.id, index: entries.length - 1 },
+        toReport: this.#expectOutcome(data.id, entries.length - 1),
       });
       this.#reportDraft();
       return;
@@ -264,7 +306,7 @@ export class ChatStore {
       pending: null,
       entries,
       focusComposer: this.#state.focusComposer + 1,
-      toReport: { id: data.id, index: entries.length - 1 },
+      toReport: this.#expectOutcome(data.id, entries.length - 1),
     });
   }
 
@@ -286,12 +328,9 @@ export class ChatStore {
   }
 
   #show(data: Extract<PanelMessage, { type: 'show' }>): void {
-    // An outcome the view has not reported yet is reported from its text,
-    // because the view is about to draw another chat.
-    const { toReport } = this.#state;
-    if (toReport !== null) {
-      this.reportShown(this.#state.entries[toReport.index]?.text ?? '');
-    }
+    // The view is about to draw another chat, so an outcome it has not reported
+    // yet will never be drawn. It is settled as not displayed, never as text.
+    this.#abandonOutcomes();
     // A switch always ends on the chat itself.
     this.#set({ history: null });
     this.#withdrawPending();
@@ -311,6 +350,8 @@ export class ChatStore {
   // ----------------------------------------------------------- the chat list
 
   #openHistory(items: readonly ChatListItem[]): void {
+    // The list takes the place of the chat, so nothing more of it is drawn.
+    this.#abandonOutcomes();
     this.#set({
       history: { items, query: '', matching: items, highlighted: items.length > 0 ? 0 : -1 },
     });

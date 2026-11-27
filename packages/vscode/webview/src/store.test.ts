@@ -79,27 +79,63 @@ describe('the chat page', () => {
     ]);
     // What was displayed is reported by the view, once it has drawn the reply.
     expect(page.posted.some((message) => message.type === 'shown')).toBe(false);
-    expect(page.state().toReport).toEqual({ id, index: 1 });
-    page.store.reportShown('Hi there');
+    expect(page.state().toReport).toEqual([{ id, index: 1 }]);
+    page.store.reportShown(id, 'Hi there');
     expect(page.posted.at(-1)).toEqual({ type: 'shown', id, text: 'Hi there' });
-    expect(page.state().toReport).toBeNull();
-    page.store.reportShown('again');
-    expect(page.posted.filter((message) => message.type === 'shown')).toHaveLength(1);
+    expect(page.state().toReport).toEqual([]);
+    // Each outcome is settled once.
+    page.store.reportShown(id, 'again');
+    page.store.reportNotShown(id);
+    expect(
+      page.posted.filter((message) => message.type === 'shown' || message.type === 'notShown'),
+    ).toHaveLength(1);
   });
 
-  it('reports an outcome the view has not drawn yet, from its text, before showing another chat', () => {
+  it('keeps the outcome of each request when two end before the view reports', () => {
+    const page = open();
+    page.show(1);
+    page.exchange('one', 'First.');
+    page.exchange('two', 'Second.');
+
+    expect(page.state().toReport).toEqual([
+      { id: 1, index: 1 },
+      { id: 2, index: 3 },
+    ]);
+    page.store.reportShown(2, 'Second.');
+    page.store.reportShown(1, 'First.');
+    expect(page.posted.filter((message) => message.type === 'shown')).toEqual([
+      { type: 'shown', id: 2, text: 'Second.' },
+      { type: 'shown', id: 1, text: 'First.' },
+    ]);
+  });
+
+  it('never reports text it did not draw: a switch first settles the outcome as not displayed', () => {
     const page = open();
     page.show(1);
     const { id } = page.send('hello');
-    page.store.receive({ type: 'error', id, message: 'The provider could not be reached.' });
+    page.store.receive({ type: 'text', id, text: '**never drawn**' });
+    page.store.receive({ type: 'end', id, stopReason: 'end' });
     page.show(2);
 
-    expect(page.posted).toContainEqual({
-      type: 'shown',
-      id,
-      text: 'The provider could not be reached.',
-    });
-    expect(page.state().toReport).toBeNull();
+    expect(page.posted).toContainEqual({ type: 'notShown', id });
+    expect(page.posted.some((message) => message.type === 'shown')).toBe(false);
+    expect(page.state().toReport).toEqual([]);
+  });
+
+  it('settles outcomes as not displayed when the chat list takes the place of the chat', () => {
+    const page = open();
+    page.show(1);
+    page.exchange('one', 'First.');
+    page.store.receive({ type: 'history', items: [] });
+    expect(page.posted).toContainEqual({ type: 'notShown', id: 1 });
+
+    // A reply that ends while the list is open cannot be drawn either.
+    page.store.closeHistory();
+    const { id } = page.send('two');
+    page.store.receive({ type: 'history', items: [] });
+    page.store.receive({ type: 'end', id, stopReason: 'end' });
+    expect(page.posted).toContainEqual({ type: 'notShown', id });
+    expect(page.state().toReport).toEqual([]);
   });
 
   it('ignores answers to any other message', () => {
@@ -176,7 +212,7 @@ describe('the chat page', () => {
     expect(page.state().draft).toBe('hello');
     expect(page.state().entries).toEqual([{ kind: 'error', text: 'The chat is being switched.' }]);
     expect(page.posted).toContainEqual({ type: 'draft', chat: 1, text: 'hello', returned: [id] });
-    expect(page.state().toReport).toEqual({ id, index: 0 });
+    expect(page.state().toReport).toEqual([{ id, index: 0 }]);
   });
 
   it('tells the extension when it takes back or refuses a message a test submitted', () => {

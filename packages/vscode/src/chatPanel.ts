@@ -62,6 +62,9 @@ export interface PanelActions {
 /** How long a page has to confirm a switch before it is loaded again. */
 const CONFIRM_TIMEOUT_MS = 10_000;
 
+/** How long a submission waits for the page to report what it displayed. */
+const DISPLAY_TIMEOUT_MS = 10_000;
+
 /** Everything the extension keeps about one chat. */
 interface ChatRecord {
   readonly key: number;
@@ -161,6 +164,9 @@ export class ChatPanelController {
   #activeDone: Promise<void> = Promise.resolve();
   readonly #outcomes = new Map<number, ChatOutcome>();
   readonly #tokenByRequest = new Map<number, number>();
+  /** Stops waiting for a display report, by request. */
+  readonly #displayTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  readonly #displayTimeout: number;
   readonly #waiting = new Map<number, (result: SubmitResult) => void>();
   #nextToken = 1;
 
@@ -183,12 +189,14 @@ export class ChatPanelController {
     options: {
       readonly now?: () => number;
       readonly confirmTimeout?: number;
+      readonly displayTimeout?: number;
       readonly actions?: PanelActions;
     } = {},
   ) {
     this.#chat = chat;
     this.#now = options.now ?? Date.now;
     this.#confirmTimeout = options.confirmTimeout ?? CONFIRM_TIMEOUT_MS;
+    this.#displayTimeout = options.displayTimeout ?? DISPLAY_TIMEOUT_MS;
     this.#actions = options.actions;
     this.#current = this.#create();
   }
@@ -240,6 +248,10 @@ export class ChatPanelController {
     }
     this.#outcomes.clear();
     this.#tokenByRequest.clear();
+    for (const timer of this.#displayTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.#displayTimers.clear();
     for (const resolve of this.#waiting.values()) {
       resolve({ error: 'The chat panel was closed.' });
     }
@@ -277,7 +289,7 @@ export class ChatPanelController {
     } else if (message.type === 'open' && typeof message.key === 'number') {
       // A chat picked from the list. An unknown chat changes nothing.
       void this.open(message.key).catch(() => undefined);
-    } else if (message.type === 'shown') {
+    } else if (message.type === 'shown' || message.type === 'notShown') {
       this.#handleShown(message);
     } else if (message.type === 'rejected' && typeof message.token === 'number') {
       this.#settle(message.token, { error: 'The chat panel did not accept the message.' });
@@ -566,7 +578,7 @@ export class ChatPanelController {
       if (shown !== undefined && trimmed !== '') {
         shown.returns.set(id, trimmed);
       }
-      this.#outcomes.set(id, { error: reason });
+      this.#recordOutcome(id, { error: reason });
       port.post({ type: 'error', id, message: reason, withdraw: true });
     };
     if (trimmed === '') {
@@ -632,7 +644,7 @@ export class ChatPanelController {
     if (this.#port !== port) {
       return;
     }
-    this.#outcomes.set(id, outcome);
+    this.#recordOutcome(id, outcome);
     if ('error' in outcome) {
       post(
         lost
@@ -645,17 +657,48 @@ export class ChatPanelController {
   }
 
   /** The page reports what it displayed once a request had ended. */
+  /**
+   * Keeps the outcome of a request until the page reports whether it displayed
+   * it. A submission waits for that report only for a while: after that it is
+   * settled with the outcome and no display text.
+   */
+  #recordOutcome(id: number, outcome: ChatOutcome): void {
+    this.#outcomes.set(id, outcome);
+    if (this.#tokenByRequest.has(id)) {
+      this.#displayTimers.set(
+        id,
+        setTimeout(() => {
+          this.#finishDisplay(id, undefined);
+        }, this.#displayTimeout),
+      );
+    }
+  }
+
+  /** The page reports what it displayed for a request, or that it displayed nothing. */
   #handleShown(message: Record<string, unknown>): void {
     const { id, text } = message;
     if (typeof id !== 'number') {
       return;
     }
+    this.#finishDisplay(
+      id,
+      message.type === 'shown' && typeof text === 'string' ? text : undefined,
+    );
+  }
+
+  /** Settles a submission with its outcome, and what the page displayed when it said. */
+  #finishDisplay(id: number, shown: string | undefined): void {
     const outcome = this.#outcomes.get(id);
     const token = this.#tokenByRequest.get(id);
     this.#outcomes.delete(id);
     this.#tokenByRequest.delete(id);
+    const timer = this.#displayTimers.get(id);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.#displayTimers.delete(id);
+    }
     if (outcome !== undefined && token !== undefined) {
-      this.#settle(token, { ...outcome, ...(typeof text === 'string' ? { shown: text } : {}) });
+      this.#settle(token, shown === undefined ? outcome : { ...outcome, shown });
     }
   }
 

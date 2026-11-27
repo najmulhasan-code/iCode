@@ -1,7 +1,6 @@
 import {
   type KeyboardEvent,
   type ReactNode,
-  type Ref,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -68,19 +67,27 @@ function Thread({ store, state }: { store: ChatStore; state: ChatState }): React
       element.scrollTop = element.scrollHeight;
     }
   });
-  // Once the outcome of a request is drawn, the view reports what it shows.
-  // It waits two frames, so that parts drawn after the first commit, such as
-  // code blocks, are included.
-  const reported = useRef<HTMLElement>(null);
+  // Once the outcome of a request is drawn, the view reports what it shows,
+  // read from the page. It waits two frames, so that parts drawn after the
+  // first commit, such as code blocks, are included. An outcome whose entry
+  // is not on the page is reported as not displayed.
+  const drawn = useRef(new Map<number, HTMLElement>());
   const { toReport } = state;
   useEffect(() => {
-    if (toReport === null) {
+    if (toReport.length === 0) {
       return undefined;
     }
     let second = 0;
     const first = requestAnimationFrame(() => {
       second = requestAnimationFrame(() => {
-        store.reportShown(reported.current?.textContent ?? '');
+        for (const { id, index } of toReport) {
+          const element = drawn.current.get(index);
+          if (element === undefined) {
+            store.reportNotShown(id);
+          } else {
+            store.reportShown(id, element.textContent);
+          }
+        }
       });
     });
     return () => {
@@ -88,6 +95,13 @@ function Thread({ store, state }: { store: ChatStore; state: ChatState }): React
       cancelAnimationFrame(second);
     };
   }, [store, toReport]);
+  const register = (index: number) => (element: HTMLElement | null) => {
+    if (element === null) {
+      drawn.current.delete(index);
+    } else {
+      drawn.current.set(index, element);
+    }
+  };
   const { pending } = state;
   return (
     <div
@@ -102,12 +116,7 @@ function Thread({ store, state }: { store: ChatStore; state: ChatState }): React
       }}
     >
       {state.entries.map((entry, index) => (
-        <Entry
-          key={index}
-          entry={entry}
-          store={store}
-          shownRef={toReport?.index === index ? reported : undefined}
-        />
+        <Entry key={index} entry={entry} store={store} shownRef={register(index)} />
       ))}
       {pending !== null && (
         <>
@@ -137,18 +146,15 @@ function Entry({
 }: {
   entry: ChatEntry;
   store: ChatStore;
-  /** Set on the entry that shows the outcome of the request that just ended. */
-  shownRef?: Ref<HTMLElement> | undefined;
+  /** Receives the element that shows the entry's outcome. */
+  shownRef: (element: HTMLElement | null) => void;
 }): ReactNode {
   if (entry.kind === 'user') {
     return <UserMessage text={entry.text} />;
   }
   if (entry.kind === 'error') {
     return (
-      <p
-        ref={shownRef as Ref<HTMLParagraphElement>}
-        className="text-[var(--vscode-errorForeground)]"
-      >
+      <p ref={shownRef} className="text-[var(--vscode-errorForeground)]">
         {entry.text}
       </p>
     );
@@ -156,8 +162,9 @@ function Entry({
   const note = entry.stopReason === undefined ? undefined : NOTE_BY_STOP_REASON[entry.stopReason];
   return (
     <div className="group flex flex-col gap-1">
-      {entry.text !== '' && (
-        <div ref={shownRef as Ref<HTMLDivElement>}>
+      {/* Always drawn, so a reply with no text is reported as displaying nothing. */}
+      <div ref={shownRef}>
+        {entry.text !== '' && (
           <Markdown
             text={entry.text}
             streaming={false}
@@ -166,8 +173,8 @@ function Entry({
               store.openLink(url);
             }}
           />
-        </div>
-      )}
+        )}
+      </div>
       {note !== undefined && (
         <p className="text-[var(--vscode-descriptionForeground)] italic">{note}</p>
       )}

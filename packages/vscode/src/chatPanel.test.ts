@@ -1075,3 +1075,48 @@ describe('copying and links asked for by the page', () => {
     expect(opened).toEqual([]);
   });
 });
+
+describe('a submission waiting for the page to report what it displayed', () => {
+  async function submitted(options: { displayTimeout?: number } = {}) {
+    const chat = fakeChat();
+    const controller = new ChatPanelController(chat.backend, options);
+    const port = page(controller);
+    controller.attach(port);
+    await settle();
+    const result = controller.submit('hello');
+    await settle();
+    const request = port.posted.at(-1) as { token: number };
+    controller.handle(port, {
+      type: 'send',
+      chat: port.key,
+      id: 1,
+      text: 'hello',
+      token: request.token,
+    });
+    chat.sends[0]?.piece('Hi.');
+    chat.sends[0]?.end('end');
+    await settle();
+    return { controller, port, result };
+  }
+
+  it('is settled without display text when the page says it displayed nothing', async () => {
+    const { controller, port, result } = await submitted();
+    controller.handle(port, { type: 'notShown', id: 1 });
+
+    await expect(result).resolves.toEqual({ text: 'Hi.', stopReason: 'end' });
+  });
+
+  it('is settled without display text when the page does not report in time', async () => {
+    const { result } = await submitted({ displayTimeout: 20 });
+
+    await expect(result).resolves.toEqual({ text: 'Hi.', stopReason: 'end' });
+  });
+
+  it('takes only the first report for a request', async () => {
+    const { controller, port, result } = await submitted();
+    controller.handle(port, { type: 'shown', id: 1, text: 'Hi.' });
+    controller.handle(port, { type: 'notShown', id: 1 });
+
+    await expect(result).resolves.toEqual({ text: 'Hi.', stopReason: 'end', shown: 'Hi.' });
+  });
+});
