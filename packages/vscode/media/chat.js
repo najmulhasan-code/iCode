@@ -14,6 +14,12 @@
 // unsent text of the chat the page leaves.
 (function () {
   const vscode = acquireVsCodeApi();
+  // The number of this copy of the page. Every message carries it, so the
+  // extension can ignore a copy that was replaced.
+  const load = Number(document.getElementById('icode-load').getAttribute('content'));
+  function post(message) {
+    vscode.postMessage({ ...message, load });
+  }
   const messages = document.getElementById('messages');
   const welcome = document.getElementById('welcome');
   const status = document.getElementById('status');
@@ -67,7 +73,7 @@
    */
   function reportDraft() {
     if (chatKey !== null) {
-      vscode.postMessage({ type: 'draft', chat: chatKey, text: input.value, returned });
+      post({ type: 'draft', chat: chatKey, text: input.value, returned });
       returned = [];
     }
   }
@@ -87,7 +93,7 @@
     nextId += 1;
     updateControls();
     const draft = fromComposer ? '' : input.value;
-    vscode.postMessage({
+    post({
       type: 'send',
       id: current.id,
       chat: chatKey,
@@ -111,7 +117,7 @@
     updateControls();
     input.focus();
     // Tells the extension what this page displayed for the request.
-    vscode.postMessage({ type: 'shown', id, text: kind === 'error' ? note : shown });
+    post({ type: 'shown', id, text: kind === 'error' ? note : shown });
   }
 
   /**
@@ -139,7 +145,7 @@
     const { token } = current;
     withdraw();
     if (token !== undefined) {
-      vscode.postMessage({ type: 'rejected', token });
+      post({ type: 'rejected', token });
     }
   }
 
@@ -173,7 +179,7 @@
     // The final unsent text of the chat this page leaves.
     const left = chatKey === null ? null : { key: chatKey, draft: input.value, returned };
     returned = [];
-    vscode.postMessage({ type: 'switched', seq: message.seq, left });
+    post({ type: 'switched', seq: message.seq, left });
     chatKey = message.key;
     draw(message.entries);
     if (!message.carry) {
@@ -255,12 +261,16 @@
 
   function pick(key) {
     closeHistory();
-    vscode.postMessage({ type: 'open', key });
+    post({ type: 'open', key });
   }
 
   historyBack.addEventListener('click', closeHistory);
   historySearch.addEventListener('input', drawHistory);
   historySearch.addEventListener('keydown', (event) => {
+    // Keys that finish a character being composed belong to the search box.
+    if (event.isComposing) {
+      return;
+    }
     const count = matching.length;
     if (event.key === 'ArrowDown' && count > 0) {
       event.preventDefault();
@@ -274,7 +284,7 @@
     }
   });
   historyView.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
+    if (event.key === 'Escape' && !event.isComposing) {
       event.preventDefault();
       closeHistory();
     }
@@ -287,7 +297,7 @@
     }
   });
   stopButton.addEventListener('click', () => {
-    vscode.postMessage({ type: 'cancel' });
+    post({ type: 'cancel' });
   });
   input.addEventListener('input', () => {
     updateControls();
@@ -305,7 +315,7 @@
     const message = event.data;
     if (message.type === 'submit') {
       if (!submit(message.text, message.token)) {
-        vscode.postMessage({ type: 'rejected', token: message.token });
+        post({ type: 'rejected', token: message.token });
       }
       return;
     }
@@ -320,7 +330,12 @@
       return;
     }
     if (message.type === 'focus') {
-      input.focus();
+      // The composer is wanted, so the chat list, if shown, makes way for it.
+      if (historyView.hidden) {
+        input.focus();
+      } else {
+        closeHistory();
+      }
       return;
     }
     if (current === null || message.id !== current.id) {
@@ -339,12 +354,12 @@
       updateControls();
       reportDraft();
       input.focus();
-      vscode.postMessage({ type: 'shown', id, text: message.message });
+      post({ type: 'shown', id, text: message.message });
     } else if (message.type === 'error') {
       finish(message.message, 'error');
     }
   });
 
   updateControls();
-  vscode.postMessage({ type: 'ready' });
+  post({ type: 'ready' });
 })();

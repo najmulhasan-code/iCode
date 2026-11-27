@@ -88,6 +88,7 @@ function openPage() {
     'history-search',
     'history-list',
     'history-empty',
+    'icode-load',
   ]) {
     elements.set(id, new FakeElement());
   }
@@ -101,11 +102,17 @@ function openPage() {
   element('messages').append(element('welcome'));
   // As on the real page, the chat list starts hidden.
   element('history').hidden = true;
+  element('icode-load').setAttribute('content', '7');
+  /** What the page sent, without the load number, which `loads` keeps. */
   const posted: Record<string, unknown>[] = [];
+  const loads: unknown[] = [];
   const window = new FakeElement();
   runInNewContext(SCRIPT, {
     acquireVsCodeApi: () => ({
-      postMessage: (message: Record<string, unknown>) => posted.push(message),
+      postMessage: ({ load, ...message }: Record<string, unknown>) => {
+        loads.push(load);
+        posted.push(message);
+      },
     }),
     document: {
       getElementById: element,
@@ -116,6 +123,7 @@ function openPage() {
   const input = element('input');
   return {
     posted,
+    loads,
     input,
     /** A message from the extension. */
     receive: (message: Record<string, unknown>) => {
@@ -176,6 +184,15 @@ function exchange(page: ReturnType<typeof openPage>, text: string, reply: string
 }
 
 describe('the panel script', () => {
+  it('puts the number of its copy of the page on every message', () => {
+    const page = openPage();
+    show(page, 1);
+    page.send('hello');
+
+    expect(page.loads.length).toBeGreaterThan(2);
+    expect(new Set(page.loads)).toEqual(new Set([7]));
+  });
+
   it('sends nothing until it has been shown a chat', () => {
     const page = openPage();
     page.input.value = 'too early';
@@ -362,6 +379,26 @@ describe('the chat list in the panel', () => {
     page.receive({ type: 'history', items: ITEMS });
     page.element('history-back').click();
     expect(page.historyShown()).toBe(false);
+    expect(page.posted.some((message) => message.type === 'open')).toBe(false);
+  });
+
+  it('makes way for the composer when the extension asks for it', () => {
+    const page = withList();
+    page.receive({ type: 'focus' });
+
+    expect(page.historyShown()).toBe(false);
+  });
+
+  it('leaves keys that finish a character being composed to the search box', () => {
+    const page = withList();
+    for (const key of ['Enter', 'ArrowDown', 'Escape']) {
+      const event = { key, isComposing: true, preventDefault: () => undefined };
+      page.element('history-search').dispatch('keydown', event);
+      page.element('history').dispatch('keydown', event);
+    }
+
+    expect(page.historyShown()).toBe(true);
+    expect(page.rows()[0]?.highlighted).toBe(true);
     expect(page.posted.some((message) => message.type === 'open')).toBe(false);
   });
 

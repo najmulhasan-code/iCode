@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
-import type { ChatPanelController, PanelPort } from './chatPanel';
+import type { ChatPanelController } from './chatPanel';
+import { PageLoads } from './pageLoads';
 
 /** The logo, drawn inline so that its dot can be animated by the stylesheet. */
 const MARK = `<svg class="mark" viewBox="0 0 128 128" aria-hidden="true">
@@ -36,32 +37,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     };
     const uri = (file: string): string =>
       webview.asWebviewUri(vscode.Uri.joinPath(this.#mediaUri, file)).toString();
-    const load = (): void => {
-      webview.html = renderChatHtml(webview.cspSource, uri('chat.css'), uri('chat.js'));
-    };
-    const port: PanelPort = {
-      post: (message) => {
+    const loads = new PageLoads(
+      this.#controller,
+      (message) => {
         void webview.postMessage(message);
       },
-      // A page that stopped answering is replaced. It says when it is ready.
-      reload: load,
-    };
+      (load) => {
+        webview.html = renderChatHtml(webview.cspSource, uri('chat.css'), uri('chat.js'), load);
+      },
+    );
     webview.onDidReceiveMessage((message: unknown) => {
-      // The page says when its script is running. Until then it cannot receive anything.
-      if ((message as { type?: unknown } | null)?.type === 'ready') {
-        this.#controller.attach(port);
-      } else {
-        this.#controller.handle(port, message);
-      }
+      loads.receive(message);
     });
     view.onDidDispose(() => {
-      this.#controller.detach(port);
+      loads.dispose();
     });
-    load();
+    loads.load();
   }
 }
 
-function renderChatHtml(cspSource: string, styleUri: string, scriptUri: string): string {
+function renderChatHtml(
+  cspSource: string,
+  styleUri: string,
+  scriptUri: string,
+  load: number,
+): string {
   // The script is allowed by a value that is new for every page, so nothing
   // else can run even if text from a model were ever treated as markup.
   const nonce = randomBytes(16).toString('base64');
@@ -71,6 +71,7 @@ function renderChatHtml(cspSource: string, styleUri: string, scriptUri: string):
     <meta charset="UTF-8" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; script-src 'nonce-${nonce}';" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta id="icode-load" name="icode-load" content="${String(load)}" />
     <link rel="stylesheet" href="${styleUri}" />
     <title>iCode</title>
   </head>
