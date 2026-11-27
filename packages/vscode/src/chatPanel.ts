@@ -1,6 +1,10 @@
 import type { StopReason } from '@icode/protocol';
-import { type ChatListItem, chatListItems } from './chatList';
+import { chatListItems } from './chatList';
+import type { ChatEntry, PanelMessage } from './panelProtocol';
 import { ConversationLostError, type ConversationRef } from './chatSession';
+import { validateLink } from './links';
+
+export type { ChatEntry, ChatListItem, PanelMessage } from './panelProtocol';
 
 /** How one message sent from the panel ended. */
 export type ChatOutcome =
@@ -8,51 +12,6 @@ export type ChatOutcome =
 
 /** What a test learns about one submission: how it ended and what the page showed for it. */
 export type SubmitResult = ChatOutcome & { readonly shown?: string };
-
-/**
- * One thing a chat shows, in order. A reply without a stop reason is the part
- * of a reply that was written before the request failed.
- */
-export type ChatEntry =
-  | { readonly kind: 'user'; readonly text: string }
-  | { readonly kind: 'reply'; readonly text: string; readonly stopReason?: StopReason }
-  | { readonly kind: 'error'; readonly text: string };
-
-/**
- * A message from the extension to the page. Every reply message names the
- * request it belongs to.
- */
-export type PanelMessage =
-  | { readonly type: 'text'; readonly id: number; readonly text: string }
-  | { readonly type: 'end'; readonly id: number; readonly stopReason: StopReason }
-  /**
-   * With `withdraw`, the message was not sent: it was refused, or the chat
-   * can no longer be continued. Its text goes back into the composer.
-   */
-  | {
-      readonly type: 'error';
-      readonly id: number;
-      readonly message: string;
-      readonly withdraw?: true;
-    }
-  | { readonly type: 'submit'; readonly text: string; readonly token: number }
-  /**
-   * Show this chat. The page answers with `switched`, naming `seq` and the
-   * unsent text of the chat it showed until now. With `carry`, the page keeps
-   * the text in its composer for this chat, instead of `draft`.
-   */
-  | {
-      readonly type: 'show';
-      readonly seq: number;
-      readonly key: number;
-      readonly entries: readonly ChatEntry[];
-      readonly draft: string;
-      readonly carry: boolean;
-    }
-  /** Show the chat list in the panel, in place of the chat. */
-  | { readonly type: 'history'; readonly items: readonly ChatListItem[] }
-  /** Move the cursor to the composer. */
-  | { readonly type: 'focus' };
 
 /** One open page of the chat panel. */
 export interface PanelPort {
@@ -88,6 +47,17 @@ export type NewChatResult = 'started' | 'empty';
 
 /** What opening a chat from the list did. */
 export type OpenResult = 'opened' | 'current' | 'gone';
+
+/** The most text a page may ask to copy at once. */
+const MAX_COPY_LENGTH = 1_000_000;
+
+/** What the controller may do in the editor on the page's behalf. */
+export interface PanelActions {
+  /** Puts text on the clipboard. */
+  copy(text: string): void;
+  /** Opens a web or mail address that has passed the link check. */
+  openLink(url: string): void;
+}
 
 /** How long a page has to confirm a switch before it is loaded again. */
 const CONFIRM_TIMEOUT_MS = 10_000;
@@ -177,12 +147,14 @@ function applyDraft(record: ChatRecord, text: string, returned: unknown): void {
  *
  * The page is not trusted. Only a well-formed request is acted on, and all a
  * page can ask for is to send a message, to stop the reply, to keep the
- * unsent text of the chat it shows, and to open a chat from the list.
+ * unsent text of the chat it shows, to open a chat from the list, to copy
+ * text, and to open a link that passes the link check.
  */
 export class ChatPanelController {
   readonly #chat: ChatBackend;
   readonly #now: () => number;
   readonly #confirmTimeout: number;
+  readonly #actions: PanelActions | undefined;
   #port: PanelPort | undefined;
   #active: { readonly port: PanelPort; readonly id: number } | undefined;
   /** Settles when the running request has ended and been recorded. */
@@ -208,11 +180,16 @@ export class ChatPanelController {
 
   constructor(
     chat: ChatBackend,
-    options: { readonly now?: () => number; readonly confirmTimeout?: number } = {},
+    options: {
+      readonly now?: () => number;
+      readonly confirmTimeout?: number;
+      readonly actions?: PanelActions;
+    } = {},
   ) {
     this.#chat = chat;
     this.#now = options.now ?? Date.now;
     this.#confirmTimeout = options.confirmTimeout ?? CONFIRM_TIMEOUT_MS;
+    this.#actions = options.actions;
     this.#current = this.#create();
   }
 
@@ -284,6 +261,17 @@ export class ChatPanelController {
       this.#handleDraft(message);
     } else if (message.type === 'switched') {
       this.#handleSwitched(message);
+    } else if (message.type === 'copy' && typeof message.text === 'string') {
+      if (message.text.length <= MAX_COPY_LENGTH) {
+        this.#actions?.copy(message.text);
+      }
+    } else if (message.type === 'openLink' && typeof message.url === 'string') {
+      // The page checked the link when it drew it. It is checked again here,
+      // because the page is not trusted.
+      const url = validateLink(message.url);
+      if (url !== '') {
+        this.#actions?.openLink(url);
+      }
     } else if (message.type === 'open' && typeof message.key === 'number') {
       // A chat picked from the list. An unknown chat changes nothing.
       void this.open(message.key).catch(() => undefined);

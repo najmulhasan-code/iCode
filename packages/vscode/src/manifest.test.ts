@@ -8,6 +8,10 @@ interface Manifest {
       readonly properties: Readonly<Record<string, { readonly scope?: string }>>;
     };
     readonly commands: readonly { readonly command: string; readonly icon?: string }[];
+    readonly viewsContainers: { readonly activitybar: readonly { readonly title: string }[] };
+    readonly views: Readonly<
+      Record<string, readonly { readonly id: string; readonly name: string }[]>
+    >;
     readonly menus: Readonly<
       Record<string, readonly { readonly command: string; when?: string; group?: string }[]>
     >;
@@ -46,6 +50,15 @@ describe('the extension manifest', () => {
       command: name,
       when: 'view == icode.chat',
       group,
+    });
+  });
+
+  // VS Code shows "Container: View" when the two names differ, and one name when they match.
+  it('names the side bar view like its container, so the title reads only iCode', () => {
+    expect(manifest.contributes.viewsContainers.activitybar[0]?.title).toBe('iCode');
+    expect(manifest.contributes.views.icode?.[0]).toMatchObject({
+      id: 'icode.chat',
+      name: 'iCode',
     });
   });
 });

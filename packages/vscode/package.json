@@ -20,6 +20,9 @@
     "Chat"
   ],
   "main": "./dist/extension.js",
+  "scripts": {
+    "build:webview": "vite build --config vite.webview.config.mjs"
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -35,7 +38,7 @@
         {
           "type": "webview",
           "id": "icode.chat",
-          "name": "Chat"
+          "name": "iCode"
         }
       ]
     },

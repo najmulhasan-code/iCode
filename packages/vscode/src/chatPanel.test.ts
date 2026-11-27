@@ -1002,3 +1002,55 @@ describe('the chat list in the panel', () => {
     expect(port.shows).toHaveLength(3);
   });
 });
+
+describe('copying and links asked for by the page', () => {
+  async function withActions() {
+    const copied: string[] = [];
+    const opened: string[] = [];
+    const chat = fakeChat();
+    const controller = new ChatPanelController(chat.backend, {
+      actions: {
+        copy: (text) => copied.push(text),
+        openLink: (url) => opened.push(url),
+      },
+    });
+    const port = page(controller);
+    controller.attach(port);
+    await settle();
+    return { controller, port, copied, opened };
+  }
+
+  it('copies text through the editor', async () => {
+    const { controller, port, copied } = await withActions();
+    controller.handle(port, { type: 'copy', text: 'const x = 1;' });
+    controller.handle(port, { type: 'copy', text: 42 });
+
+    expect(copied).toEqual(['const x = 1;']);
+  });
+
+  it('opens only links that pass the check again, whatever the page sent', async () => {
+    const { controller, port, opened } = await withActions();
+    for (const url of [
+      'https://example.com/docs',
+      'javascript:alert(1)',
+      'command:workbench.action.terminal.new',
+      'file:///C:/secret.txt',
+      'http://example.com',
+      'mailto:someone@example.com',
+    ]) {
+      controller.handle(port, { type: 'openLink', url });
+    }
+
+    expect(opened).toEqual(['https://example.com/docs', 'mailto:someone@example.com']);
+  });
+
+  it('ignores both from a page that is gone', async () => {
+    const { controller, port, copied, opened } = await withActions();
+    controller.detach(port);
+    controller.handle(port, { type: 'copy', text: 'x' });
+    controller.handle(port, { type: 'openLink', url: 'https://example.com' });
+
+    expect(copied).toEqual([]);
+    expect(opened).toEqual([]);
+  });
+});
