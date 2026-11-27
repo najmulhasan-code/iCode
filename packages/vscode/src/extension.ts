@@ -89,7 +89,17 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
     readKey: (provider) => context.secrets.get(secretName(provider)),
   });
   routes.chat = session;
-  const panel = new ChatPanelController(session);
+  const panel = new ChatPanelController(session, {
+    actions: {
+      copy: async (text) => {
+        await vscode.env.clipboard.writeText(text);
+      },
+      // The controller passes only links that are full https or mailto addresses.
+      openLink: (url) => {
+        void vscode.env.openExternal(vscode.Uri.parse(url, true));
+      },
+    },
+  });
   const chatView = new ChatViewProvider(context.extensionUri, panel);
 
   context.subscriptions.push(

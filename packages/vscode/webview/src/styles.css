@@ -1,0 +1,256 @@
+@import 'tailwindcss';
+@import '@vscode/codicons/dist/codicon.css';
+
+/* Streamdown and its code plugin style their parts with these classes. */
+@source "../../../../node_modules/streamdown/dist/*.js";
+@source "../../../../node_modules/@streamdown/code/dist/*.js";
+
+/* VS Code marks the page with the kind of its theme. */
+@custom-variant dark (&:where(.vscode-dark, .vscode-dark *, .vscode-high-contrast, .vscode-high-contrast *));
+
+/* Every colour comes from the editor's theme, so the panel follows any theme. */
+@theme inline {
+  --color-background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  --color-foreground: var(--vscode-foreground);
+  --color-muted: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
+  --color-muted-foreground: var(--vscode-descriptionForeground);
+  --color-border: var(--vscode-widget-border, var(--vscode-panel-border));
+  --color-sidebar: var(--vscode-editor-background);
+  --color-primary: var(--vscode-button-background);
+  --color-primary-foreground: var(--vscode-button-foreground);
+  --font-sans: var(--vscode-font-family);
+  --font-mono: var(--vscode-editor-font-family);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  color: var(--vscode-foreground);
+  background: transparent;
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  line-height: 1.55;
+}
+
+/* ------------------------------------------------------------ replies */
+
+.icode-markdown {
+  overflow-wrap: anywhere;
+}
+
+.icode-markdown > * + * {
+  margin-top: 0.6em;
+}
+
+.icode-markdown :not(pre) > code {
+  padding: 0.05em 0.35em;
+  border-radius: 4px;
+  background: var(--vscode-textCodeBlock-background, rgb(128 128 128 / 0.18));
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.92em;
+}
+
+.icode-markdown pre,
+.icode-markdown pre code {
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size, 12px);
+  line-height: 1.5;
+}
+
+/* Headings are sized for a narrow panel: one step above the body text. */
+.icode-markdown [data-streamdown^='heading-'] {
+  margin: 0.9em 0 0.25em;
+  font-weight: 600;
+  line-height: 1.35;
+  font-size: 1em;
+}
+
+.icode-markdown [data-streamdown='heading-1'] {
+  font-size: 1.2em;
+}
+
+.icode-markdown [data-streamdown='heading-2'] {
+  font-size: 1.1em;
+}
+
+.icode-markdown > :first-child[data-streamdown^='heading-'] {
+  margin-top: 0;
+}
+
+/* A code block is one box: a slim header with the language, then the code. */
+.icode-markdown [data-streamdown='code-block'] {
+  gap: 0;
+  margin: 0.5em 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-radius: 8px;
+  background: var(--vscode-editor-background);
+}
+
+.icode-markdown [data-streamdown='code-block-header'] {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.icode-markdown [data-streamdown='code-block-header'] span {
+  margin: 0;
+}
+
+.icode-markdown [data-streamdown='code-block-body'] {
+  padding: 0 12px 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* A table is one box. */
+.icode-markdown [data-streamdown='table-wrapper'] {
+  gap: 0;
+  margin: 0.5em 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.icode-markdown [data-streamdown='table-wrapper'] > div {
+  border-radius: 8px;
+}
+
+.icode-markdown [data-streamdown='table-header-cell'],
+.icode-markdown [data-streamdown='table-cell'] {
+  padding: 5px 10px;
+  font-size: 0.95em;
+}
+
+/* High contrast themes keep their own contrast: code is shown without colours. */
+.vscode-high-contrast .icode-markdown pre *,
+.vscode-high-contrast-light .icode-markdown pre * {
+  color: var(--vscode-editor-foreground) !important;
+}
+
+/* A link is a control that asks the extension to open it. */
+.icode-link {
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+  text-underline-offset: 2px;
+}
+
+.icode-link:hover {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+  text-decoration: underline;
+}
+
+.icode-link:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+/* iCode's copy button sits in the code block's header and shows on hover. */
+.icode-code {
+  position: relative;
+}
+
+.icode-code > .copy-button {
+  position: absolute;
+  top: 1px;
+  right: 4px;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+
+.icode-code:hover > .copy-button,
+.icode-code:focus-within > .copy-button,
+.icode-code > .copy-button[aria-label='Copied'],
+.icode-code > .copy-button[aria-label='Could not copy'] {
+  opacity: 1;
+}
+
+/* ------------------------------------------------------------ controls */
+
+.icon-button:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.icon-button:focus-visible,
+.round-button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.composer:focus-within {
+  border-color: var(--vscode-focusBorder);
+}
+
+.round-button {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+
+.round-button:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.round-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.history-item:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.history-item[aria-selected='true'] {
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
+  background: var(--vscode-list-activeSelectionBackground);
+}
+
+.history-item[aria-selected='true'] .history-description {
+  color: inherit;
+  opacity: 0.85;
+}
+
+/* ------------------------------------------------------------ the logo */
+
+.mark-frame {
+  fill: #00a36c;
+}
+
+.mark-dot,
+.mark-stem {
+  fill: #ffffff;
+}
+
+.moving .mark-dot {
+  animation: mark-fade 1.5s ease-in-out infinite;
+}
+
+.shimmer {
+  animation: mark-fade 1.5s ease-in-out infinite;
+}
+
+@keyframes mark-fade {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .moving .mark-dot,
+  .shimmer {
+    animation: none;
+  }
+}

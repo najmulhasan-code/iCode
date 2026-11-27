@@ -1,6 +1,10 @@
 import type { StopReason } from '@icode/protocol';
-import { type ChatListItem, chatListItems } from './chatList';
+import { chatListItems } from './chatList';
+import type { ChatEntry, PanelMessage } from './panelProtocol';
 import { ConversationLostError, type ConversationRef } from './chatSession';
+import { validateLink } from './links';
+
+export type { ChatEntry, ChatListItem, PanelMessage } from './panelProtocol';
 
 /** How one message sent from the panel ended. */
 export type ChatOutcome =
@@ -8,51 +12,6 @@ export type ChatOutcome =
 
 /** What a test learns about one submission: how it ended and what the page showed for it. */
 export type SubmitResult = ChatOutcome & { readonly shown?: string };
-
-/**
- * One thing a chat shows, in order. A reply without a stop reason is the part
- * of a reply that was written before the request failed.
- */
-export type ChatEntry =
-  | { readonly kind: 'user'; readonly text: string }
-  | { readonly kind: 'reply'; readonly text: string; readonly stopReason?: StopReason }
-  | { readonly kind: 'error'; readonly text: string };
-
-/**
- * A message from the extension to the page. Every reply message names the
- * request it belongs to.
- */
-export type PanelMessage =
-  | { readonly type: 'text'; readonly id: number; readonly text: string }
-  | { readonly type: 'end'; readonly id: number; readonly stopReason: StopReason }
-  /**
-   * With `withdraw`, the message was not sent: it was refused, or the chat
-   * can no longer be continued. Its text goes back into the composer.
-   */
-  | {
-      readonly type: 'error';
-      readonly id: number;
-      readonly message: string;
-      readonly withdraw?: true;
-    }
-  | { readonly type: 'submit'; readonly text: string; readonly token: number }
-  /**
-   * Show this chat. The page answers with `switched`, naming `seq` and the
-   * unsent text of the chat it showed until now. With `carry`, the page keeps
-   * the text in its composer for this chat, instead of `draft`.
-   */
-  | {
-      readonly type: 'show';
-      readonly seq: number;
-      readonly key: number;
-      readonly entries: readonly ChatEntry[];
-      readonly draft: string;
-      readonly carry: boolean;
-    }
-  /** Show the chat list in the panel, in place of the chat. */
-  | { readonly type: 'history'; readonly items: readonly ChatListItem[] }
-  /** Move the cursor to the composer. */
-  | { readonly type: 'focus' };
 
 /** One open page of the chat panel. */
 export interface PanelPort {
@@ -89,8 +48,22 @@ export type NewChatResult = 'started' | 'empty';
 /** What opening a chat from the list did. */
 export type OpenResult = 'opened' | 'current' | 'gone';
 
+/** The most text a page may ask to copy at once. */
+const MAX_COPY_LENGTH = 1_000_000;
+
+/** What the controller may do in the editor on the page's behalf. */
+export interface PanelActions {
+  /** Puts text on the clipboard. Rejects when it could not. */
+  copy(text: string): Promise<void>;
+  /** Opens a web or mail address that has passed the link check. */
+  openLink(url: string): void;
+}
+
 /** How long a page has to confirm a switch before it is loaded again. */
 const CONFIRM_TIMEOUT_MS = 10_000;
+
+/** How long a submission waits for the page to report what it displayed. */
+const DISPLAY_TIMEOUT_MS = 10_000;
 
 /** Everything the extension keeps about one chat. */
 interface ChatRecord {
@@ -177,18 +150,23 @@ function applyDraft(record: ChatRecord, text: string, returned: unknown): void {
  *
  * The page is not trusted. Only a well-formed request is acted on, and all a
  * page can ask for is to send a message, to stop the reply, to keep the
- * unsent text of the chat it shows, and to open a chat from the list.
+ * unsent text of the chat it shows, to open a chat from the list, to copy
+ * text, and to open a link that passes the link check.
  */
 export class ChatPanelController {
   readonly #chat: ChatBackend;
   readonly #now: () => number;
   readonly #confirmTimeout: number;
+  readonly #actions: PanelActions | undefined;
   #port: PanelPort | undefined;
   #active: { readonly port: PanelPort; readonly id: number } | undefined;
   /** Settles when the running request has ended and been recorded. */
   #activeDone: Promise<void> = Promise.resolve();
   readonly #outcomes = new Map<number, ChatOutcome>();
   readonly #tokenByRequest = new Map<number, number>();
+  /** Stops waiting for a display report, by request. */
+  readonly #displayTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  readonly #displayTimeout: number;
   readonly #waiting = new Map<number, (result: SubmitResult) => void>();
   #nextToken = 1;
 
@@ -208,11 +186,18 @@ export class ChatPanelController {
 
   constructor(
     chat: ChatBackend,
-    options: { readonly now?: () => number; readonly confirmTimeout?: number } = {},
+    options: {
+      readonly now?: () => number;
+      readonly confirmTimeout?: number;
+      readonly displayTimeout?: number;
+      readonly actions?: PanelActions;
+    } = {},
   ) {
     this.#chat = chat;
     this.#now = options.now ?? Date.now;
     this.#confirmTimeout = options.confirmTimeout ?? CONFIRM_TIMEOUT_MS;
+    this.#displayTimeout = options.displayTimeout ?? DISPLAY_TIMEOUT_MS;
+    this.#actions = options.actions;
     this.#current = this.#create();
   }
 
@@ -263,6 +248,10 @@ export class ChatPanelController {
     }
     this.#outcomes.clear();
     this.#tokenByRequest.clear();
+    for (const timer of this.#displayTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.#displayTimers.clear();
     for (const resolve of this.#waiting.values()) {
       resolve({ error: 'The chat panel was closed.' });
     }
@@ -284,14 +273,49 @@ export class ChatPanelController {
       this.#handleDraft(message);
     } else if (message.type === 'switched') {
       this.#handleSwitched(message);
+    } else if (
+      message.type === 'copy' &&
+      typeof message.id === 'number' &&
+      typeof message.text === 'string'
+    ) {
+      this.#copy(port, message.id, message.text);
+    } else if (message.type === 'openLink' && typeof message.url === 'string') {
+      // The page checked the link when it drew it. It is checked again here,
+      // because the page is not trusted.
+      const url = validateLink(message.url);
+      if (url !== '') {
+        this.#actions?.openLink(url);
+      }
     } else if (message.type === 'open' && typeof message.key === 'number') {
       // A chat picked from the list. An unknown chat changes nothing.
       void this.open(message.key).catch(() => undefined);
-    } else if (message.type === 'shown') {
+    } else if (message.type === 'shown' || message.type === 'notShown') {
       this.#handleShown(message);
     } else if (message.type === 'rejected' && typeof message.token === 'number') {
       this.#settle(message.token, { error: 'The chat panel did not accept the message.' });
     }
+  }
+
+  /** Copies text for the page and tells it whether the copy succeeded. */
+  #copy(port: PanelPort, id: number, text: string): void {
+    const answer = (ok: boolean): void => {
+      if (this.#port === port) {
+        port.post({ type: 'copied', id, ok });
+      }
+    };
+    const actions = this.#actions;
+    if (actions === undefined || text.length > MAX_COPY_LENGTH) {
+      answer(false);
+      return;
+    }
+    actions.copy(text).then(
+      () => {
+        answer(true);
+      },
+      () => {
+        answer(false);
+      },
+    );
   }
 
   /**
@@ -554,7 +578,7 @@ export class ChatPanelController {
       if (shown !== undefined && trimmed !== '') {
         shown.returns.set(id, trimmed);
       }
-      this.#outcomes.set(id, { error: reason });
+      this.#recordOutcome(id, { error: reason });
       port.post({ type: 'error', id, message: reason, withdraw: true });
     };
     if (trimmed === '') {
@@ -620,7 +644,7 @@ export class ChatPanelController {
     if (this.#port !== port) {
       return;
     }
-    this.#outcomes.set(id, outcome);
+    this.#recordOutcome(id, outcome);
     if ('error' in outcome) {
       post(
         lost
@@ -633,17 +657,48 @@ export class ChatPanelController {
   }
 
   /** The page reports what it displayed once a request had ended. */
+  /**
+   * Keeps the outcome of a request until the page reports whether it displayed
+   * it. A submission waits for that report only for a while: after that it is
+   * settled with the outcome and no display text.
+   */
+  #recordOutcome(id: number, outcome: ChatOutcome): void {
+    this.#outcomes.set(id, outcome);
+    if (this.#tokenByRequest.has(id)) {
+      this.#displayTimers.set(
+        id,
+        setTimeout(() => {
+          this.#finishDisplay(id, undefined);
+        }, this.#displayTimeout),
+      );
+    }
+  }
+
+  /** The page reports what it displayed for a request, or that it displayed nothing. */
   #handleShown(message: Record<string, unknown>): void {
     const { id, text } = message;
     if (typeof id !== 'number') {
       return;
     }
+    this.#finishDisplay(
+      id,
+      message.type === 'shown' && typeof text === 'string' ? text : undefined,
+    );
+  }
+
+  /** Settles a submission with its outcome, and what the page displayed when it said. */
+  #finishDisplay(id: number, shown: string | undefined): void {
     const outcome = this.#outcomes.get(id);
     const token = this.#tokenByRequest.get(id);
     this.#outcomes.delete(id);
     this.#tokenByRequest.delete(id);
+    const timer = this.#displayTimers.get(id);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.#displayTimers.delete(id);
+    }
     if (outcome !== undefined && token !== undefined) {
-      this.#settle(token, { ...outcome, ...(typeof text === 'string' ? { shown: text } : {}) });
+      this.#settle(token, shown === undefined ? outcome : { ...outcome, shown });
     }
   }
 

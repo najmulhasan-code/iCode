@@ -1002,3 +1002,121 @@ describe('the chat list in the panel', () => {
     expect(port.shows).toHaveLength(3);
   });
 });
+
+describe('copying and links asked for by the page', () => {
+  async function withActions(copy: (text: string) => Promise<void> = () => Promise.resolve()) {
+    const copied: string[] = [];
+    const opened: string[] = [];
+    const chat = fakeChat();
+    const controller = new ChatPanelController(chat.backend, {
+      actions: {
+        copy: (text) => {
+          copied.push(text);
+          return copy(text);
+        },
+        openLink: (url) => opened.push(url),
+      },
+    });
+    const port = page(controller);
+    controller.attach(port);
+    await settle();
+    return { controller, port, copied, opened };
+  }
+
+  it('copies text through the editor and says that it did', async () => {
+    const { controller, port, copied } = await withActions();
+    controller.handle(port, { type: 'copy', id: 1, text: 'const x = 1;' });
+    controller.handle(port, { type: 'copy', id: 2, text: 42 });
+    controller.handle(port, { type: 'copy', text: 'no number' });
+    await settle();
+
+    expect(copied).toEqual(['const x = 1;']);
+    expect(port.posted).toEqual([{ type: 'copied', id: 1, ok: true }]);
+  });
+
+  it('says so when the clipboard refuses, or the text is too long', async () => {
+    const { controller, port, copied } = await withActions(() =>
+      Promise.reject(new Error('no clipboard')),
+    );
+    controller.handle(port, { type: 'copy', id: 1, text: 'x' });
+    controller.handle(port, { type: 'copy', id: 2, text: 'y'.repeat(1_000_001) });
+    await settle();
+
+    expect(copied).toEqual(['x']);
+    expect(port.posted).toEqual([
+      { type: 'copied', id: 2, ok: false },
+      { type: 'copied', id: 1, ok: false },
+    ]);
+  });
+
+  it('opens only links that pass the check again, whatever the page sent', async () => {
+    const { controller, port, opened } = await withActions();
+    for (const url of [
+      'https://example.com/docs',
+      'javascript:alert(1)',
+      'command:workbench.action.terminal.new',
+      'file:///C:/secret.txt',
+      'http://example.com',
+      'mailto:someone@example.com',
+    ]) {
+      controller.handle(port, { type: 'openLink', url });
+    }
+
+    expect(opened).toEqual(['https://example.com/docs', 'mailto:someone@example.com']);
+  });
+
+  it('ignores both from a page that is gone', async () => {
+    const { controller, port, copied, opened } = await withActions();
+    controller.detach(port);
+    controller.handle(port, { type: 'copy', id: 1, text: 'x' });
+    controller.handle(port, { type: 'openLink', url: 'https://example.com' });
+
+    expect(copied).toEqual([]);
+    expect(opened).toEqual([]);
+  });
+});
+
+describe('a submission waiting for the page to report what it displayed', () => {
+  async function submitted(options: { displayTimeout?: number } = {}) {
+    const chat = fakeChat();
+    const controller = new ChatPanelController(chat.backend, options);
+    const port = page(controller);
+    controller.attach(port);
+    await settle();
+    const result = controller.submit('hello');
+    await settle();
+    const request = port.posted.at(-1) as { token: number };
+    controller.handle(port, {
+      type: 'send',
+      chat: port.key,
+      id: 1,
+      text: 'hello',
+      token: request.token,
+    });
+    chat.sends[0]?.piece('Hi.');
+    chat.sends[0]?.end('end');
+    await settle();
+    return { controller, port, result };
+  }
+
+  it('is settled without display text when the page says it displayed nothing', async () => {
+    const { controller, port, result } = await submitted();
+    controller.handle(port, { type: 'notShown', id: 1 });
+
+    await expect(result).resolves.toEqual({ text: 'Hi.', stopReason: 'end' });
+  });
+
+  it('is settled without display text when the page does not report in time', async () => {
+    const { result } = await submitted({ displayTimeout: 20 });
+
+    await expect(result).resolves.toEqual({ text: 'Hi.', stopReason: 'end' });
+  });
+
+  it('takes only the first report for a request', async () => {
+    const { controller, port, result } = await submitted();
+    controller.handle(port, { type: 'shown', id: 1, text: 'Hi.' });
+    controller.handle(port, { type: 'notShown', id: 1 });
+
+    await expect(result).resolves.toEqual({ text: 'Hi.', stopReason: 'end', shown: 'Hi.' });
+  });
+});

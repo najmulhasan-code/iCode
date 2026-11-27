@@ -18,8 +18,8 @@
     "e2e"
   ],
   "scripts": {
-    "build": "tsc --build",
-    "typecheck": "tsc --build",
+    "build": "tsc --build && npm run build:webview --workspace icode",
+    "typecheck": "tsc --build && tsc -p packages/vscode/webview",
     "lint": "eslint eslint.config.js vitest.config.js packages e2e",
     "format": "prettier --write \"*.{js,json}\" \"{README,CONTRIBUTING}.md\" .github packages \"e2e/*.json\" e2e/src",
     "format:check": "prettier --check \"*.{js,json}\" \"{README,CONTRIBUTING}.md\" .github packages \"e2e/*.json\" e2e/src",

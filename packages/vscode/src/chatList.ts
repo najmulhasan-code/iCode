@@ -1,14 +1,8 @@
 import type { ChatSummary } from './chatPanel';
+import type { ChatListItem } from './panelProtocol';
 
 /** The longest name a chat gets in the list, in characters. */
 const TITLE_LENGTH = 60;
-
-/** One row of the chat list in the panel. */
-export interface ChatListItem {
-  readonly key: number;
-  readonly title: string;
-  readonly description: string;
-}
 
 /** The name of a chat in the list: its text on one line, cut to a length that fits. */
 export function chatTitle(chat: ChatSummary): string {
