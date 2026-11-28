@@ -41,6 +41,7 @@ import {
   ModelConfigError,
   ModelError,
   type ModelUsage,
+  checkedUsage,
 } from './model.js';
 
 export interface ServerOptions {
@@ -71,27 +72,6 @@ export interface ServerOptions {
 }
 
 /** Resolves when the signal aborts. */
-function isCount(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-/**
- * The counts a client is told. A provider's server can send anything, so a
- * number that is not a count is left out, and with it the whole usage when
- * the input or the output is not one.
- */
-function toTokenUsage(usage: ModelUsage): TokenUsage | undefined {
-  if (!isCount(usage.inputTokens) || !isCount(usage.outputTokens)) {
-    return undefined;
-  }
-  return {
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    ...(isCount(usage.cacheReadTokens) ? { cacheReadTokens: usage.cacheReadTokens } : {}),
-    ...(isCount(usage.cacheWriteTokens) ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
-  };
-}
-
 function whenAborted(signal: AbortSignal): Promise<'aborted'> {
   return new Promise((resolve) => {
     if (signal.aborted) {
@@ -310,7 +290,8 @@ export async function serve(options: ServerOptions): Promise<void> {
         // Not awaited: a provider that ignores cancellation must not hold the request open.
         void Promise.resolve(events.return?.()).catch(() => undefined);
       }
-      const counts = usage === undefined ? undefined : toTokenUsage(usage);
+      // Checked again here: a model is not always one of this code base's adapters.
+      const counts: TokenUsage | undefined = usage === undefined ? undefined : checkedUsage(usage);
       const result: ChatSendResult = {
         stopReason: controller.signal.aborted ? 'cancelled' : stopReason,
         ...(counts === undefined ? {} : { usage: counts }),

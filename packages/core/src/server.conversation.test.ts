@@ -382,7 +382,17 @@ describe('chat/send', () => {
     [
       'a cache count that is not a count',
       { usage: { inputTokens: 5, outputTokens: 7, cacheReadTokens: 1.5 } },
-      { inputTokens: 5, outputTokens: 7 },
+      undefined,
+    ],
+    [
+      'cache counts larger than the input',
+      { usage: { inputTokens: 5, outputTokens: 7, cacheReadTokens: 3, cacheWriteTokens: 3 } },
+      undefined,
+    ],
+    [
+      'counts of zero',
+      { usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 } },
+      { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 },
     ],
   ])('tells only real counts after %s', async (_name, extra, expected) => {
     const end = { type: 'end', reason: 'end', ...extra } as ModelEvent;

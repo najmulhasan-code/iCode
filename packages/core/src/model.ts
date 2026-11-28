@@ -68,9 +68,47 @@ export interface ModelUsage {
   readonly inputTokens: number;
   readonly outputTokens: number;
   /** The part of the input read from the provider's cache, when it says. */
-  readonly cacheReadTokens?: number | undefined;
+  readonly cacheReadTokens?: number;
   /** The part of the input written to the provider's cache, when it says. */
-  readonly cacheWriteTokens?: number | undefined;
+  readonly cacheWriteTokens?: number;
+}
+
+/** Whether a value a provider sent is a count: a whole number, zero or more. */
+export function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * The usage, if every number in it can be trusted. A provider's server can
+ * send anything, and a wrong number must never look like a real one. So the
+ * input and the output must be counts, a cache part is either not reported
+ * (`undefined` or `null`) or a count, and the cache parts together cannot
+ * exceed the input. Otherwise there is no usage at all.
+ */
+export function checkedUsage(reported: {
+  readonly inputTokens: unknown;
+  readonly outputTokens: unknown;
+  readonly cacheReadTokens?: unknown;
+  readonly cacheWriteTokens?: unknown;
+}): ModelUsage | undefined {
+  const { inputTokens, outputTokens } = reported;
+  const read = reported.cacheReadTokens ?? undefined;
+  const write = reported.cacheWriteTokens ?? undefined;
+  if (!isCount(inputTokens) || !isCount(outputTokens)) {
+    return undefined;
+  }
+  if ((read !== undefined && !isCount(read)) || (write !== undefined && !isCount(write))) {
+    return undefined;
+  }
+  if ((read ?? 0) + (write ?? 0) > inputTokens) {
+    return undefined;
+  }
+  return {
+    inputTokens,
+    outputTokens,
+    ...(read === undefined ? {} : { cacheReadTokens: read }),
+    ...(write === undefined ? {} : { cacheWriteTokens: write }),
+  };
 }
 
 /**
