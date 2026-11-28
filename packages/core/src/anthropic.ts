@@ -10,7 +10,7 @@ import {
   type ModelStopReason,
   messageText,
 } from './model.js';
-import { kindForStatus, redact } from './modelErrors.js';
+import { kindForStatus } from './modelErrors.js';
 
 export interface AnthropicModelOptions {
   readonly apiKey: string;
@@ -76,11 +76,12 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
   // The address the client really uses, including any set by the environment.
   const endpoint = client.baseURL;
   const log = options.log ?? (() => undefined);
-  // Set once the API has confirmed a mismatch. The API drops failing blocks
-  // for one request only, and the history is never changed, so from then on
-  // every request asks for the drop. Without this, each later message would
-  // fail once and be sent twice.
-  let dropMismatched = false;
+  const checked = HISTORY_CHECKED.has(model);
+  // Noted in a conversation once the API has confirmed a mismatch in it. The
+  // API drops failing blocks for one request only, and the history is never
+  // changed, so every later request of that conversation asks for the drop.
+  // Without the note, each later message would fail once and be sent twice.
+  const dropNote = `${ADAPTER}|${endpoint}|drop-mismatched`;
 
   return {
     async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
@@ -97,13 +98,16 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
       // its conversation, the request is sent once more, asking the API to
       // drop the failing blocks. The stored history is never changed.
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const recover = dropMismatched;
+        const recover = checked && request.memory?.get(dropNote) === 'yes';
         try {
           const events = client.beta.messages.stream(
             {
               model,
               max_tokens: maxTokens,
-              betas: recover ? [FALLBACK_BETA, BINDING_BETA] : [FALLBACK_BETA],
+              // With the binding beta the API reports every thinking block it
+              // dropped or let through despite a mismatch, also when it does
+              // not answer with an error.
+              betas: checked ? [FALLBACK_BETA, BINDING_BETA] : [FALLBACK_BETA],
               fallbacks: 'default',
               ...(recover
                 ? {
@@ -153,7 +157,8 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
           if (
             !recover &&
             !yielded &&
-            HISTORY_CHECKED.has(model) &&
+            checked &&
+            request.memory !== undefined &&
             error instanceof Anthropic.APIError &&
             error.status === 400 &&
             PREFIX_MISMATCH.test(error.message)
@@ -161,10 +166,10 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
             log(
               'a replayed thinking block no longer matched its conversation; from now on the API is asked to drop failing blocks',
             );
-            dropMismatched = true;
+            request.memory.set(dropNote, 'yes');
             continue;
           }
-          throw toModelError(error, options.apiKey);
+          throw toModelError(error);
         }
       }
       // A cancelled stream can also end without an error.
@@ -242,6 +247,17 @@ function toAnthropicMessages(
 /** Block kinds that go back from before a fallback marker. */
 const KEPT_BEFORE_FALLBACK = new Set(['text', 'fallback']);
 
+/** The results of server tool calls that this code knows. */
+const SERVER_TOOL_RESULTS = new Set([
+  'web_search_tool_result',
+  'web_fetch_tool_result',
+  'advisor_tool_result',
+  'code_execution_tool_result',
+  'bash_code_execution_tool_result',
+  'text_editor_code_execution_tool_result',
+  'tool_search_tool_result',
+]);
+
 /**
  * Applies the provider's rule for sending back a reply in which another model
  * took over: before the last fallback marker, only text, the markers, and
@@ -257,20 +273,27 @@ export function echoAfterFallback(
   if (boundary === -1) {
     return [...blocks];
   }
+  // A server tool call and its result go back only as a pair.
+  const head = blocks.slice(0, boundary);
+  const called = new Set<string>();
   const answered = new Set<string>();
-  for (const block of blocks.slice(0, boundary)) {
-    if (block.type.endsWith('_tool_result') && 'tool_use_id' in block) {
+  for (const block of head) {
+    if (block.type === 'server_tool_use') {
+      called.add(block.id);
+    } else if (SERVER_TOOL_RESULTS.has(block.type) && 'tool_use_id' in block) {
       answered.add(block.tool_use_id);
     }
   }
-  const before = blocks.slice(0, boundary).filter((block) => {
+  const before = head.filter((block) => {
     if (KEPT_BEFORE_FALLBACK.has(block.type)) {
       return true;
     }
     if (block.type === 'server_tool_use') {
       return answered.has(block.id);
     }
-    return block.type.endsWith('_tool_result') && 'tool_use_id' in block;
+    return (
+      SERVER_TOOL_RESULTS.has(block.type) && 'tool_use_id' in block && called.has(block.tool_use_id)
+    );
   });
   return [...before, ...blocks.slice(boundary)];
 }
@@ -282,9 +305,11 @@ function logDroppedBlocks(reply: Anthropic.Beta.BetaMessage, log: (text: string)
     return;
   }
   for (const entry of reported as { type?: unknown; reason?: unknown; path?: unknown }[]) {
-    log(
-      `the API changed the history it read: ${String(entry.type)} (${String(entry.reason)}) at ${String(entry.path)}`,
-    );
+    // Only values of the expected plain shape are written; anything else is named as unknown.
+    const type = plain(entry.type, /^[a-z_]{1,60}$/);
+    const reason = plain(entry.reason, /^[a-z_]{1,60}$/);
+    const path = plain(entry.path, /^[a-z0-9_.]{1,80}$/);
+    log(`the API reports a thinking block of the history: ${type} (${reason}) at ${path}`);
   }
 }
 
@@ -325,19 +350,29 @@ const KIND_BY_ERROR_TYPE: ReadonlyMap<string, ModelErrorKind> = new Map([
   ['timeout_error', 'connection'],
 ]);
 
+/** A value from outside, if it is text of the expected plain shape, else `unknown`. */
+function plain(value: unknown, shape: RegExp): string {
+  return typeof value === 'string' && shape.test(value) ? value : 'unknown';
+}
+
 /**
  * Turns a failure into a ModelError. The kind comes from the error type the
  * API named when there is one, because an error inside an open stream has no
  * HTTP status, and from the status otherwise.
+ *
+ * The message is written here from the status, the error type and the request
+ * id, and never from the provider's own text. A request carries replies with
+ * private provider blocks, and a provider or the SDK may echo part of a
+ * request or a reply in an error. The message is written to the log. The
+ * request id finds the full error in the provider's console.
  */
-function toModelError(error: unknown, apiKey: string): ModelError {
+function toModelError(error: unknown): ModelError {
   if (error instanceof ModelError) {
     return error;
   }
-  const message = redact(error instanceof Error ? error.message : String(error), apiKey);
   // The connection classes extend APIError, so they are checked before it.
   if (error instanceof Anthropic.APIConnectionError) {
-    return new ModelError('connection', message);
+    return new ModelError('connection', 'the API could not be reached');
   }
   if (error instanceof Anthropic.APIError) {
     const rawStatus: unknown = error.status;
@@ -345,7 +380,13 @@ function toModelError(error: unknown, apiKey: string): ModelError {
     const rawType: unknown = error.type;
     const named = typeof rawType === 'string' ? KIND_BY_ERROR_TYPE.get(rawType) : undefined;
     const kind = named ?? (status === undefined ? 'unexpected' : kindForStatus(status));
-    return new ModelError(kind, message, status);
+    const type = plain(rawType, /^[a-z_]{1,60}$/);
+    const requestId = plain(error.requestID, /^[A-Za-z0-9_-]{1,80}$/);
+    return new ModelError(
+      kind,
+      `the API answered with status ${status === undefined ? 'unknown' : String(status)}, error type ${type}, request id ${requestId}`,
+      status,
+    );
   }
-  return new ModelError('unexpected', message);
+  return new ModelError('unexpected', 'the reply could not be read');
 }

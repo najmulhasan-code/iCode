@@ -133,8 +133,8 @@ export function describeModelContract(name: string, harness: ContractHarness): v
       const failure = await collect(harness.createModel(api.url, 0)).catch(
         (error: unknown) => error,
       );
-      const message = failure instanceof Error ? failure.message : '';
-      expect(message).toContain('[redacted]');
+      // An adapter may redact the provider's text or leave it out altogether.
+      const message = failure instanceof Error ? failure.message : harness.apiKey;
       expect(message).not.toContain(harness.apiKey);
     });
   });

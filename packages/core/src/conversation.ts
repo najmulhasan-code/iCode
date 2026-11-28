@@ -28,6 +28,8 @@ export interface Turn {
 export class Conversation {
   readonly #messages: ChatMessage[] = [];
   #current: Turn | undefined;
+  /** Notes that model adapters keep about this conversation. */
+  readonly memory = new Map<string, string>();
 
   /** Whether a turn has begun and not yet ended. */
   get busy(): boolean {

@@ -109,11 +109,16 @@ function sendError(response: ServerResponse, status: number, type: string): void
   response.end(JSON.stringify({ type: 'error', error: { type, message: `stand-in ${type}` } }));
 }
 
-async function collect(model: Model, signal?: AbortSignal): Promise<ModelEvent[]> {
+async function collect(
+  model: Model,
+  signal?: AbortSignal,
+  memory?: Map<string, string>,
+): Promise<ModelEvent[]> {
   const events: ModelEvent[] = [];
   const request = {
     messages: [{ role: 'user', parts: [{ kind: 'text', text: 'hi' }] }] as const,
     signal: signal ?? new AbortController().signal,
+    ...(memory === undefined ? {} : { memory }),
   };
   for await (const event of model.stream(request)) {
     events.push(event);
@@ -411,8 +416,10 @@ describe('a failed request', () => {
     });
 
     const failure = await collect(modelFor(api.url)).catch((error: unknown) => error);
-    const message = failure instanceof Error ? failure.message : '';
-    expect(message).toContain('[redacted]');
+    const message = failure instanceof Error ? failure.message : 'test-key';
+    expect(message).toBe(
+      'the API answered with status 401, error type authentication_error, request id unknown',
+    );
     expect(message).not.toContain('test-key');
     expect(message).not.toContain('abc123456789');
     expect(message).not.toContain('abcdefghijkl');
@@ -743,6 +750,8 @@ describe('echoAfterFallback', () => {
       { type: 'server_tool_use', id: 'srv_2', name: 'web_search', input: {} },
       { type: 'tool_use', id: 'tu_1', name: 'x', input: {} },
       { type: 'connector_text', text: 'hidden' },
+      { type: 'web_search_tool_result', tool_use_id: 'srv_gone', content: [] },
+      { type: 'unknown_tool_result', tool_use_id: 'srv_1', content: [] },
       marker,
       { type: 'thinking', thinking: '', signature: 's2' },
       { type: 'text', text: 'after' },
@@ -778,7 +787,11 @@ describe('a request whose replayed thinking no longer matches its conversation',
 
   it('is sent once more, asking the API to drop the failing blocks, for a model that checks history', async () => {
     const api = await standIn(mismatchThenReply());
-    const events = await collect(modelFor(api.url, { model: 'claude-opus-5-5' }));
+    const events = await collect(
+      modelFor(api.url, { model: 'claude-opus-5-5' }),
+      undefined,
+      new Map(),
+    );
 
     expect(events.at(-1)).toMatchObject({ type: 'end', reason: 'end' });
     expect(api.requests).toHaveLength(2);
@@ -793,17 +806,82 @@ describe('a request whose replayed thinking no longer matches its conversation',
     expect(api.requests[1]?.body.messages).toEqual(api.requests[0]?.body.messages);
   });
 
-  it('keeps asking for the drop on later requests, so they are sent once', async () => {
+  it('keeps asking for the drop in that conversation only, also with a new adapter', async () => {
     const api = await standIn(mismatchThenReply());
     const model = modelFor(api.url, { model: 'claude-opus-5-5' });
-    await collect(model);
-    await collect(model);
+    const recovered = new Map<string, string>();
+    await collect(model, undefined, recovered);
+    // Another conversation on the same adapter is not affected.
+    await collect(model, undefined, new Map());
+    // The recovered conversation continues it, even after the adapter was replaced.
+    await collect(modelFor(api.url, { model: 'claude-opus-5-5' }), undefined, recovered);
 
-    expect(api.requests).toHaveLength(3);
-    expect(api.requests[2]?.body.thinking).toEqual({
+    expect(api.requests).toHaveLength(4);
+    expect(api.requests[2]?.body.thinking).toBeUndefined();
+    expect(api.requests[3]?.body.thinking).toEqual({
       type: 'adaptive',
       block_binding: { prefix_mismatch_behavior: 'drop_block' },
     });
+  });
+
+  it('asks the API to report mismatches on every request of a model that checks history, and logs them plainly', async () => {
+    const lines: string[] = [];
+    const api = await standIn((response) => {
+      startStream(response);
+      const events = replyEvents(['ok'], 'end_turn');
+      (events[0] as { message: Record<string, unknown> }).message.input_transformations = [
+        {
+          type: 'thinking_mismatch_allowed',
+          reason: 'prefix_binding_mismatch',
+          path: 'messages.1.content.0',
+        },
+        { type: 'PRIVATE <b>', reason: 42, path: 'x y' },
+      ];
+      writeEvents(response, events);
+      response.end();
+    });
+    const model = createAnthropicModel({
+      apiKey: 'test-key',
+      baseURL: api.url,
+      maxRetries: 0,
+      model: 'claude-opus-5-5',
+      log: (line) => lines.push(line),
+    });
+    await collect(model);
+
+    expect(api.requests[0]?.headers['anthropic-beta']).toContain(
+      'thinking-binding-controls-2026-08-01',
+    );
+    expect(api.requests[0]?.body.thinking).toBeUndefined();
+    expect(lines).toEqual([
+      'the API reports a thinking block of the history: thinking_mismatch_allowed (prefix_binding_mismatch) at messages.1.content.0',
+      'the API reports a thinking block of the history: unknown (unknown) at unknown',
+    ]);
+  });
+
+  it('sends a model that is not on the list exactly the request it always got', async () => {
+    const api = await standIn((response) => {
+      sendReply(response, ['ok'], 'end_turn');
+    });
+    await collect(modelFor(api.url, { model: 'claude-opus-4-8' }));
+
+    expect(api.requests[0]?.headers['anthropic-beta']).toBe('server-side-fallback-2026-07-01');
+    expect(api.requests[0]?.body.thinking).toBeUndefined();
+  });
+
+  it("never puts the provider's own error text, which may echo private blocks, into the error", async () => {
+    const echoed =
+      'messages.1.content.0: {"type":"thinking","thinking":"PRIVATE_REPLY_SENTINEL","signature":"PRIVATE_SIGNATURE_SENTINEL"}';
+    const api = await standIn(mismatchThenReply(echoed));
+
+    const failure = await collect(modelFor(api.url, { model: 'claude-opus-5-5' })).catch(
+      (error: unknown) => error,
+    );
+    const message = failure instanceof Error ? failure.message : 'PRIVATE';
+    expect(message).not.toContain('PRIVATE');
+    expect(message).toBe(
+      'the API answered with status 400, error type invalid_request_error, request id unknown',
+    );
   });
 
   it('is not retried for any other error', async () => {
@@ -818,7 +896,9 @@ describe('a request whose replayed thinking no longer matches its conversation',
   it('is not retried for a model that is not on the list', async () => {
     const api = await standIn(mismatchThenReply());
 
-    await expect(collect(modelFor(api.url, { model: 'claude-opus-4-8' }))).rejects.toMatchObject({
+    await expect(
+      collect(modelFor(api.url, { model: 'claude-opus-4-8' }), undefined, new Map()),
+    ).rejects.toMatchObject({
       kind: 'invalid_request',
     });
     expect(api.requests).toHaveLength(1);

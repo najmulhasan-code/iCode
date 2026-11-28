@@ -45,6 +45,12 @@ export interface ModelRequest {
   readonly messages: readonly ChatMessage[];
   /** Aborted when the reply is no longer wanted. */
   readonly signal: AbortSignal;
+  /**
+   * Notes an adapter keeps about this conversation, such as a recovery it
+   * must continue on later requests. They live with the conversation, so
+   * they outlast the adapter and never affect another conversation.
+   */
+  readonly memory?: Map<string, string>;
 }
 
 /**

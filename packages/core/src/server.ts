@@ -245,7 +245,11 @@ export async function serve(options: ServerOptions): Promise<void> {
     let stopReason: StopReason | undefined;
     let parts: readonly MessagePart[] | undefined;
     try {
-      const stream = model.stream({ messages: turn.messages, signal: controller.signal });
+      const stream = model.stream({
+        messages: turn.messages,
+        signal: controller.signal,
+        memory: conversation.memory,
+      });
       const events = stream[Symbol.asyncIterator]();
       try {
         while (stopReason === undefined) {
