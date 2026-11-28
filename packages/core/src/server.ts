@@ -22,6 +22,7 @@ import {
   SET_MODEL_METHOD,
   type SetModelParams,
   type StopReason,
+  type TokenUsage,
   encodeMessage,
   isCancelParams,
   isChatSendParams,
@@ -34,7 +35,14 @@ import {
 } from '@icode/protocol';
 import { randomUUID } from 'node:crypto';
 import { Conversation } from './conversation.js';
-import { type MessagePart, type Model, ModelConfigError, ModelError } from './model.js';
+import {
+  type MessagePart,
+  type Model,
+  ModelConfigError,
+  ModelError,
+  type ModelUsage,
+  checkedUsage,
+} from './model.js';
 
 export interface ServerOptions {
   /** Text from the client, in chunks of any size. */
@@ -244,6 +252,7 @@ export async function serve(options: ServerOptions): Promise<void> {
     let written = '';
     let stopReason: StopReason | undefined;
     let parts: readonly MessagePart[] | undefined;
+    let usage: ModelUsage | undefined;
     try {
       const stream = model.stream({
         messages: turn.messages,
@@ -274,14 +283,18 @@ export async function serve(options: ServerOptions): Promise<void> {
           } else {
             stopReason = step.value.reason;
             parts = step.value.parts;
+            usage = step.value.usage;
           }
         }
       } finally {
         // Not awaited: a provider that ignores cancellation must not hold the request open.
         void Promise.resolve(events.return?.()).catch(() => undefined);
       }
+      // Checked again here: a model is not always one of this code base's adapters.
+      const counts: TokenUsage | undefined = usage === undefined ? undefined : checkedUsage(usage);
       const result: ChatSendResult = {
         stopReason: controller.signal.aborted ? 'cancelled' : stopReason,
+        ...(counts === undefined ? {} : { usage: counts }),
       };
       turn.end(keptReply(result.stopReason, written, parts));
       await reply(request.id, result);

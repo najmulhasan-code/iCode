@@ -131,6 +131,76 @@ describe('OpenAI-compatible adapter', () => {
     });
   });
 
+  it('reports the cached part of the input when the server names it', async () => {
+    const api = await standIn((response) => {
+      startStream(response);
+      writeChunks(response, [
+        textChunk('ok'),
+        finishChunk('stop'),
+        {
+          ...usageChunk,
+          usage: {
+            prompt_tokens: 120,
+            completion_tokens: 7,
+            total_tokens: 127,
+            prompt_tokens_details: { cached_tokens: 100, cache_write_tokens: 15 },
+          },
+        },
+      ]);
+      finishStream(response);
+    });
+
+    expect((await collect(modelFor(api.url))).at(-1)).toMatchObject({
+      usage: { inputTokens: 120, outputTokens: 7, cacheReadTokens: 100, cacheWriteTokens: 15 },
+    });
+  });
+
+  it.each<[string, object]>([
+    ['only cache details', { prompt_tokens_details: { cached_tokens: 100 } }],
+    ['no output count', { prompt_tokens: 12 }],
+    ['an output count of null', { prompt_tokens: 12, completion_tokens: null }],
+    ['a negative input count', { prompt_tokens: -1, completion_tokens: 7 }],
+    ['a count that is text', { prompt_tokens: '12', completion_tokens: 7 }],
+    [
+      'a cache count that is not a count',
+      { prompt_tokens: 12, completion_tokens: 7, prompt_tokens_details: { cached_tokens: -1 } },
+    ],
+    [
+      'a cache count larger than the input',
+      { prompt_tokens: 12, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 13 } },
+    ],
+  ])('reports no usage when the server sends %s', async (_name, usage) => {
+    const api = await standIn((response) => {
+      startStream(response);
+      writeChunks(response, [
+        textChunk('ok'),
+        finishChunk('stop'),
+        { ...base, choices: [], usage },
+      ]);
+      finishStream(response);
+    });
+
+    const end = (await collect(modelFor(api.url))).at(-1);
+    expect(end).toMatchObject({ type: 'end', reason: 'end' });
+    expect(end).not.toHaveProperty('usage');
+  });
+
+  it('keeps counts of zero that the server reported', async () => {
+    const api = await standIn((response) => {
+      startStream(response);
+      writeChunks(response, [
+        textChunk('ok'),
+        finishChunk('stop'),
+        { ...usageChunk, usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } },
+      ]);
+      finishStream(response);
+    });
+
+    expect((await collect(modelFor(api.url))).at(-1)).toMatchObject({
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
+  });
+
   it('leaves the usage out when the server does not report it', async () => {
     const api = await standIn((response) => {
       startStream(response);

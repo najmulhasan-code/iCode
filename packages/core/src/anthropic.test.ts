@@ -186,8 +186,87 @@ describe('a reply', () => {
       max_tokens: 64000,
       stream: true,
       fallbacks: 'default',
+      cache_control: { type: 'ephemeral' },
       messages: [{ role: 'user', content: 'hi' }],
     });
+  });
+
+  it('counts cached input into the whole input and reports the cached parts', async () => {
+    const api = await standIn((response) => {
+      const events = replyEvents(['ok'], 'end_turn');
+      const start = events[0] as { message: { usage: object } };
+      start.message.usage = {
+        input_tokens: 12,
+        output_tokens: 1,
+        cache_read_input_tokens: 100,
+        cache_creation_input_tokens: 20,
+      };
+      startStream(response);
+      writeEvents(response, events);
+      response.end();
+    });
+
+    expect((await collect(modelFor(api.url))).at(-1)).toMatchObject({
+      usage: { inputTokens: 132, outputTokens: 7, cacheReadTokens: 100, cacheWriteTokens: 20 },
+    });
+  });
+
+  it.each<[string, object]>([
+    ['a negative cache count', { input_tokens: 12, output_tokens: 1, cache_read_input_tokens: -1 }],
+    [
+      'a cache count that is a fraction',
+      { input_tokens: 12, output_tokens: 1, cache_creation_input_tokens: 0.5 },
+    ],
+    ['an input that is text', { input_tokens: '12', output_tokens: 1 }],
+    [
+      'counts too large to add',
+      { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 1, cache_read_input_tokens: 5 },
+    ],
+  ])('reports no usage after %s', async (_name, usage) => {
+    const api = await standIn((response) => {
+      const events = replyEvents(['ok'], 'end_turn');
+      (events[0] as { message: { usage: object } }).message.usage = usage;
+      startStream(response);
+      writeEvents(response, events);
+      response.end();
+    });
+
+    const end = (await collect(modelFor(api.url))).at(-1);
+    expect(end).toMatchObject({ type: 'end', reason: 'end' });
+    expect(end).not.toHaveProperty('usage');
+  });
+
+  it('leaves the cache mark out when caching is switched off', async () => {
+    const api = await standIn((response) => {
+      sendReply(response, ['ok'], 'end_turn');
+    });
+    await collect(createAnthropicModel({ apiKey: 'test-key', baseURL: api.url, cache: false }));
+
+    expect(api.requests[0]?.body).not.toHaveProperty('cache_control');
+  });
+
+  it('takes the final counts when the end of the reply corrects the first ones', async () => {
+    const api = await standIn((response) => {
+      const events = replyEvents(['ok'], 'end_turn');
+      const start = events[0] as { message: { usage: object } };
+      start.message.usage = { input_tokens: 12, output_tokens: 1, cache_read_input_tokens: 100 };
+      const delta = events.at(-2) as { usage: object };
+      delta.usage = {
+        output_tokens: 7,
+        input_tokens: 30,
+        cache_read_input_tokens: 200,
+        cache_creation_input_tokens: null,
+      };
+      startStream(response);
+      writeEvents(response, events);
+      response.end();
+    });
+
+    const end = (await collect(modelFor(api.url))).at(-1);
+    expect(end).toMatchObject({
+      usage: { inputTokens: 230, outputTokens: 7, cacheReadTokens: 200 },
+    });
+    expect(end?.type === 'end' ? end.usage : undefined).not.toHaveProperty('cacheWriteTokens');
   });
 
   it('uses the model and the token limit it was configured with', async () => {

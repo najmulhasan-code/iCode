@@ -7,6 +7,7 @@ import {
   type ModelRequest,
   type ModelStopReason,
   type ModelUsage,
+  checkedUsage,
   messageText,
 } from './model.js';
 import { kindForStatus, redact } from './modelErrors.js';
@@ -67,10 +68,15 @@ export function createOpenAICompatibleModel(options: OpenAICompatibleModelOption
             servedBy = loose.model;
           }
           if (loose.usage) {
-            usage = {
-              inputTokens: loose.usage.prompt_tokens ?? 0,
-              outputTokens: loose.usage.completion_tokens ?? 0,
-            };
+            // This API counts cached input inside the prompt tokens already.
+            // A count the server left out stays unknown; it is never set to zero.
+            const details = loose.usage.prompt_tokens_details;
+            usage = checkedUsage({
+              inputTokens: loose.usage.prompt_tokens,
+              outputTokens: loose.usage.completion_tokens,
+              cacheReadTokens: details?.cached_tokens,
+              cacheWriteTokens: details?.cache_write_tokens,
+            });
           }
           const choice = loose.choices?.[0];
           if (!choice) {
@@ -113,7 +119,14 @@ export function createOpenAICompatibleModel(options: OpenAICompatibleModelOption
 /** A stream chunk as a compatible server may really send it. */
 interface LooseChunk {
   readonly model?: unknown;
-  readonly usage?: { readonly prompt_tokens?: number; readonly completion_tokens?: number } | null;
+  readonly usage?: {
+    readonly prompt_tokens?: unknown;
+    readonly completion_tokens?: unknown;
+    readonly prompt_tokens_details?: {
+      readonly cached_tokens?: unknown;
+      readonly cache_write_tokens?: unknown;
+    } | null;
+  } | null;
   readonly choices?: readonly (
     | {
         readonly delta?: { readonly content?: unknown; readonly refusal?: unknown } | null;
