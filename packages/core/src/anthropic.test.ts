@@ -606,7 +606,7 @@ const QUESTION: ChatMessage = { role: 'user', parts: [{ kind: 'text', text: 'why
 const FOLLOW_UP: ChatMessage = { role: 'user', parts: [{ kind: 'text', text: 'and then?' }] };
 
 describe('a reply kept as ordered parts', () => {
-  it('keeps every block in order as received, with signed thinking, and drops unsigned thinking', async () => {
+  it('keeps every block in order as received, and drops unsigned thinking and blank text', async () => {
     const api = await standIn((response) => {
       startStream(response);
       writeEvents(
@@ -614,6 +614,7 @@ describe('a reply kept as ordered parts', () => {
         blockEvents([
           { type: 'thinking', thinking: '', signature: 'sig-1' },
           { type: 'redacted_thinking', data: 'opaque' },
+          { type: 'text', text: '\n\n' },
           { type: 'text', text: 'Because.' },
           { type: 'thinking', thinking: 'cut off', signature: '' },
         ]),
@@ -790,6 +791,19 @@ describe('a request whose replayed thinking no longer matches its conversation',
       'thinking-binding-controls-2026-08-01',
     );
     expect(api.requests[1]?.body.messages).toEqual(api.requests[0]?.body.messages);
+  });
+
+  it('keeps asking for the drop on later requests, so they are sent once', async () => {
+    const api = await standIn(mismatchThenReply());
+    const model = modelFor(api.url, { model: 'claude-opus-5-5' });
+    await collect(model);
+    await collect(model);
+
+    expect(api.requests).toHaveLength(3);
+    expect(api.requests[2]?.body.thinking).toEqual({
+      type: 'adaptive',
+      block_binding: { prefix_mismatch_behavior: 'drop_block' },
+    });
   });
 
   it('is not retried for any other error', async () => {

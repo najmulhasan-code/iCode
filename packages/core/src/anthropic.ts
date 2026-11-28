@@ -76,6 +76,11 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
   // The address the client really uses, including any set by the environment.
   const endpoint = client.baseURL;
   const log = options.log ?? (() => undefined);
+  // Set once the API has confirmed a mismatch. The API drops failing blocks
+  // for one request only, and the history is never changed, so from then on
+  // every request asks for the drop. Without this, each later message would
+  // fail once and be sent twice.
+  let dropMismatched = false;
 
   return {
     async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
@@ -92,7 +97,7 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
       // its conversation, the request is sent once more, asking the API to
       // drop the failing blocks. The stored history is never changed.
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const recover = attempt === 1;
+        const recover = dropMismatched;
         try {
           const events = client.beta.messages.stream(
             {
@@ -154,8 +159,9 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
             PREFIX_MISMATCH.test(error.message)
           ) {
             log(
-              'a replayed thinking block no longer matched its conversation; retrying once with failing blocks dropped',
+              'a replayed thinking block no longer matched its conversation; from now on the API is asked to drop failing blocks',
             );
+            dropMismatched = true;
             continue;
           }
           throw toModelError(error, options.apiKey);
@@ -178,8 +184,10 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
 
 /**
  * The parts of a reply, in order, each block kept exactly as received with the
- * model that wrote it. A thinking block without its signature was cut off
- * before it was finished, and could never be sent back, so it is not kept.
+ * model that wrote it. Two kinds of block could never be sent back, so they
+ * are not kept: a thinking block without its signature, which was cut off
+ * before it was finished, and a text block with nothing but white space,
+ * which the API rejects in a request.
  */
 function toParts(
   blocks: readonly Anthropic.Beta.BetaContentBlock[],
@@ -189,6 +197,9 @@ function toParts(
   const parts: MessagePart[] = [];
   blocks.forEach((block, index) => {
     if (block.type === 'thinking' && block.signature === '') {
+      return;
+    }
+    if (block.type === 'text' && block.text.trim() === '') {
       return;
     }
     const source = { adapter: ADAPTER, endpoint, model: writer.get(index), block };
