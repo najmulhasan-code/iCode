@@ -8,9 +8,9 @@ export interface Turn {
    * Ends this turn. With a reply whose parts contain text, the user message
    * and the reply are kept. Without one, the turn leaves no trace and the
    * user message can be sent again. Only the first call has an effect, and
-   * it never touches a turn that began later.
+   * it never touches a turn that began later. Returns whether the turn was kept.
    */
-  end(reply?: readonly MessagePart[]): void;
+  end(reply?: readonly MessagePart[]): boolean;
 }
 
 /**
@@ -53,16 +53,18 @@ export class Conversation {
         // A turn that has ended is no longer the current one, so a late or
         // repeated call cannot end the turn that followed it.
         if (this.#current !== turn) {
-          return;
+          return false;
         }
         this.#current = undefined;
         if (reply === undefined) {
-          return;
+          return false;
         }
         const assistant: ChatMessage = { role: 'assistant', parts: [...reply] };
-        if (messageText(assistant).trim() !== '') {
-          this.#messages.push(user, assistant);
+        if (messageText(assistant).trim() === '') {
+          return false;
         }
+        this.#messages.push(user, assistant);
+        return true;
       },
     };
     this.#current = turn;

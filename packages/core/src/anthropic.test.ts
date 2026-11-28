@@ -145,7 +145,7 @@ describe('a reply', () => {
       sendReply(response, ['Hello', ', ', 'world'], 'end_turn');
     });
 
-    expect(await collect(modelFor(api.url))).toEqual([
+    expect(await collect(modelFor(api.url, { model: 'stand-in-model' }))).toEqual([
       { type: 'text', text: 'Hello' },
       { type: 'text', text: ', ' },
       { type: 'text', text: 'world' },
@@ -304,10 +304,28 @@ describe('a reply', () => {
       response.end();
     });
 
-    expect((await collect(modelFor(api.url))).at(-1)).toMatchObject({
+    expect((await collect(modelFor(api.url, { model: 'first-model' }))).at(-1)).toMatchObject({
       type: 'end',
       model: 'third-model',
+      rerouted: true,
     });
+  });
+
+  it.each<[string, string, string, boolean]>([
+    ['the model asked for', 'model-a', 'model-a', false],
+    ['the dated name of the model asked for', 'model-a', 'model-a-20260101', false],
+    ['another model, with no marker in this reply', 'model-a', 'model-b', true],
+    ['a model whose name only begins the same', 'model-a', 'model-ab', true],
+  ])('says whether another model answered: %s', async (_name, asked, served, rerouted) => {
+    const api = await standIn((response) => {
+      startStream(response);
+      writeEvents(response, replyEvents(['ok'], 'end_turn', served));
+      response.end();
+    });
+
+    const end = (await collect(modelFor(api.url, { model: asked }))).at(-1);
+    expect(end).toMatchObject({ type: 'end', model: served });
+    expect(end?.type === 'end' && end.rerouted === true).toBe(rerouted);
   });
 
   it('leaves out content that is not text', async () => {

@@ -38,7 +38,11 @@ const END: ModelEvent = { type: 'end', reason: 'end' };
  * A core with a model that follows one script per request and records the
  * messages each request carried. Requests are sent one after another.
  */
-function connect(scripts: readonly Script[], limits?: () => Promise<ModelLimits>) {
+function connect(
+  scripts: readonly Script[],
+  limits?: () => Promise<ModelLimits>,
+  now?: () => number,
+) {
   const seen: (readonly ChatMessage[])[] = [];
   const model: Model = {
     ...(limits === undefined ? {} : { limits }),
@@ -104,6 +108,7 @@ function connect(scripts: readonly Script[], limits?: () => Promise<ModelLimits>
     },
     info: { name: 'test-core', version: '0' },
     log: () => undefined,
+    ...(now === undefined ? {} : { now }),
   });
   const send = (message: object): void => {
     pending.push(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
@@ -397,29 +402,89 @@ describe('the size of a conversation', () => {
     await client.end();
   });
 
-  it('asks for the limits once, and again only after a failed answer', async () => {
+  it('asks for the limits once, and after a passing failure only when a minute has gone by', async () => {
     let asked = 0;
+    let time = 1_000_000;
+    const reply: Script = { events: [...say('ok'), counted] };
     const client = connect(
-      [
-        { events: [...say('ok'), counted] },
-        { events: [...say('ok'), counted] },
-        { events: [...say('ok'), counted] },
-      ],
+      [reply, reply, reply, reply],
       () => {
         asked += 1;
         return asked === 1
           ? Promise.reject(new ModelError('overloaded', 'detail', 529))
           : Promise.resolve({ contextTokens: 200_000 });
       },
+      () => time,
     );
     await client.request('conversation/create');
 
     expect(contextOf(await client.request('chat/send', send))).toEqual({ usedTokens: 1000 });
+    time += 59_000;
+    expect(contextOf(await client.request('chat/send', send))).toEqual({ usedTokens: 1000 });
+    expect(asked).toBe(1);
+    time += 1_000;
     expect(contextOf(await client.request('chat/send', send))).toMatchObject({
       limitTokens: 200_000,
     });
     await client.request('chat/send', send);
     expect(asked).toBe(2);
+    await client.end();
+  });
+
+  it.each(['not_found', 'authentication', 'permission', 'invalid_request', 'unexpected'] as const)(
+    'does not ask again after a failure of the kind %s',
+    async (kind) => {
+      let asked = 0;
+      let time = 1_000_000;
+      const reply: Script = { events: [...say('ok'), counted] };
+      const client = connect(
+        [reply, reply],
+        () => {
+          asked += 1;
+          return Promise.reject(new ModelError(kind, 'detail'));
+        },
+        () => time,
+      );
+      await client.request('conversation/create');
+
+      await client.request('chat/send', send);
+      time += 3_600_000;
+      expect(contextOf(await client.request('chat/send', send))).toEqual({ usedTokens: 1000 });
+      expect(asked).toBe(1);
+      await client.end();
+    },
+  );
+
+  it('is not told after a reply that was not kept, and the next reply counts afresh', async () => {
+    const thinkingOnly: ModelEvent = {
+      type: 'end',
+      reason: 'max_tokens',
+      usage: { inputTokens: 90_000, outputTokens: 10_000 },
+    };
+    const client = connect([{ events: [thinkingOnly] }, { events: [...say('ok'), counted] }], () =>
+      Promise.resolve({ contextTokens: 200_000 }),
+    );
+    await client.request('conversation/create');
+
+    expect(contextOf(await client.request('chat/send', send))).toBeUndefined();
+    expect(contextOf(await client.request('chat/send', send))).toEqual({
+      usedTokens: 1000,
+      limitTokens: 200_000,
+    });
+    expect(client.seen[1]).toHaveLength(1);
+    await client.end();
+  });
+
+  it('is not told after a reply that another model wrote, though its counts are', async () => {
+    const elsewhere: ModelEvent = { ...counted, model: 'another-model', rerouted: true };
+    const client = connect([{ events: [...say('ok'), elsewhere] }], () =>
+      Promise.resolve({ contextTokens: 200_000 }),
+    );
+    await client.request('conversation/create');
+
+    const answer = await client.request('chat/send', send);
+    expect(contextOf(answer)).toBeUndefined();
+    expect(answer).toMatchObject({ result: { usage: { inputTokens: 900, outputTokens: 100 } } });
     await client.end();
   });
 

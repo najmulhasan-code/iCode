@@ -71,9 +71,17 @@ export interface ServerOptions {
   readonly info: PeerInfo;
   /** Receives diagnostics. They never go to the client's stream. */
   readonly log?: (text: string) => void;
+  /** The time in milliseconds. By default the system clock. */
+  readonly now?: () => number;
   /** How long to wait for pending output after the client stops sending. */
   readonly shutdownTimeoutMs?: number;
 }
+
+/** Failures of a provider that can be gone a little later. */
+const PASSING_FAILURES: ReadonlySet<string> = new Set(['rate_limit', 'overloaded', 'connection']);
+
+/** How long a question about a model's limits waits after such a failure. */
+const LIMITS_RETRY_MS = 60_000;
 
 /** Resolves when the signal aborts. */
 function whenAborted(signal: AbortSignal): Promise<'aborted'> {
@@ -221,38 +229,51 @@ export async function serve(options: ServerOptions): Promise<void> {
    */
   /** The limits each model's provider stated, once it has answered. */
   const limits = new WeakMap<Model, ModelLimits>();
-  const asked = new WeakSet<Model>();
+  /** When a model may be asked again: never (`Infinity`), or from a time on. */
+  const askAgain = new WeakMap<Model, number>();
+  const now = options.now ?? Date.now;
 
   /**
-   * Asks a model's provider for its limits, once, without making anything
-   * wait for the answer. A failed question is asked again with the next message.
+   * Asks a model's provider for its limits, without making anything wait for
+   * the answer. An answer is final. So is a failure that asking again cannot
+   * change, such as an address without this question or a refused key: a
+   * changed setting gives a new model, which is asked afresh. After any other
+   * failure the question waits before it is asked again.
    */
   const askLimits = (model: Model): void => {
-    if (model.limits === undefined || asked.has(model)) {
+    if (model.limits === undefined || now() < (askAgain.get(model) ?? 0)) {
       return;
     }
-    asked.add(model);
+    askAgain.set(model, Infinity);
     model.limits().then(
       (stated) => {
         limits.set(model, checkedLimits(stated));
       },
       (error: unknown) => {
-        asked.delete(model);
-        log(`the limits of the model are unknown: ${describe(error)}`);
+        const passing = error instanceof ModelError && PASSING_FAILURES.has(error.kind);
+        if (passing) {
+          askAgain.set(model, now() + LIMITS_RETRY_MS);
+        }
+        log(
+          `the limits of the model are unknown${passing ? '' : ' and will not be asked again'}: ${describe(error)}`,
+        );
       },
     );
   };
 
   /**
-   * Where the conversation stands after a reply. Known only when the reply
-   * was kept whole and the provider counted it.
+   * Where the conversation stands after a reply that was kept whole and that
+   * the provider counted. After a reply another model wrote, the counts and
+   * the limit of the model asked for no longer describe the same thing, so
+   * nothing is told.
    */
   const contextAfter = (
     stopReason: StopReason,
     counts: TokenUsage | undefined,
     model: Model,
+    rerouted: boolean,
   ): ContextSize | undefined => {
-    if (counts === undefined || (stopReason !== 'end' && stopReason !== 'max_tokens')) {
+    if (counts === undefined || rerouted || (stopReason !== 'end' && stopReason !== 'max_tokens')) {
       return undefined;
     }
     const usedTokens = counts.inputTokens + counts.outputTokens;
@@ -301,6 +322,7 @@ export async function serve(options: ServerOptions): Promise<void> {
     let stopReason: StopReason | undefined;
     let parts: readonly MessagePart[] | undefined;
     let usage: ModelUsage | undefined;
+    let rerouted = false;
     askLimits(model);
     try {
       const stream = model.stream({
@@ -333,6 +355,7 @@ export async function serve(options: ServerOptions): Promise<void> {
             stopReason = step.value.reason;
             parts = step.value.parts;
             usage = step.value.usage;
+            rerouted = step.value.rerouted === true;
           }
         }
       } finally {
@@ -345,11 +368,13 @@ export async function serve(options: ServerOptions): Promise<void> {
         stopReason: controller.signal.aborted ? 'cancelled' : stopReason,
         ...(counts === undefined ? {} : { usage: counts }),
       };
-      const context = contextAfter(result.stopReason, counts, model);
+      // A turn the conversation did not keep, such as a reply without text,
+      // adds nothing to it, so its counts say nothing about its size.
+      const kept = turn.end(keptReply(result.stopReason, written, parts));
+      const context = kept ? contextAfter(result.stopReason, counts, model, rerouted) : undefined;
       if (context !== undefined) {
         result = { ...result, context };
       }
-      turn.end(keptReply(result.stopReason, written, parts));
       await reply(request.id, result);
     } catch (error) {
       turn.end(controller.signal.aborted ? [{ kind: 'text', text: written }] : undefined);

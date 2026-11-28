@@ -118,6 +118,7 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
     async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
       const messages = toAnthropicMessages(request.messages, endpoint);
       let servedBy: string | undefined;
+      let rerouted = false;
       // As the API counts them: `input` leaves out what the cache served or
       // stored. After a fallback to another model these are the counts of the
       // attempt that wrote the returned reply, which is the one whose input
@@ -162,6 +163,9 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
           for await (const event of events) {
             if (event.type === 'message_start') {
               servedBy = event.message.model;
+              // After a fallback the API keeps a conversation on the other
+              // model, so a later reply can start there without a marker.
+              rerouted = !isSameModel(model, servedBy);
               counted.input = event.message.usage.input_tokens;
               counted.cacheRead = event.message.usage.cache_read_input_tokens ?? null;
               counted.cacheWrite = event.message.usage.cache_creation_input_tokens ?? null;
@@ -170,6 +174,7 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
               // that model writes the reply. There can be several switches.
               if (event.content_block.type === 'fallback') {
                 servedBy = event.content_block.to.model;
+                rerouted = true;
               }
               if (servedBy !== undefined) {
                 writer.set(event.index, servedBy);
@@ -224,10 +229,19 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
         reason: toStopReason(stopReason),
         ...(usage === undefined ? {} : { usage }),
         ...(servedBy === undefined ? {} : { model: servedBy }),
+        ...(rerouted ? { rerouted } : {}),
         ...(reply === undefined ? {} : { parts: toParts(reply.content, endpoint, writer) }),
       };
     },
   };
+}
+
+/**
+ * Whether the model that answered is the one asked for. The API answers a
+ * name without a date with the dated name of the same model.
+ */
+function isSameModel(asked: string, served: string): boolean {
+  return served === asked || served.startsWith(`${asked}-`);
 }
 
 /** Token counts as the API reports them while a reply streams. */

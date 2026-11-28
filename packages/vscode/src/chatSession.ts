@@ -64,7 +64,7 @@ const MESSAGE_BY_FAILURE_KIND: ReadonlyMap<string, string> = new Map([
   ['invalid_request', 'The provider rejected the request as invalid.'],
   [
     'context_overflow',
-    'This conversation is now longer than the model accepts. Start a new chat to continue.',
+    'This is more than the model accepts in one conversation. Shorten the message, or start a new chat.',
   ],
   ['rate_limit', 'The provider is limiting requests right now. Try again in a moment.'],
   ['overloaded', 'The provider is having trouble right now. Try again in a moment.'],

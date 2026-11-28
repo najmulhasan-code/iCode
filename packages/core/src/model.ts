@@ -124,6 +124,12 @@ export type ModelEvent =
       /** The model that wrote the reply, when the provider names it. */
       readonly model?: string;
       /**
+       * Set when a model other than the one asked for wrote the reply or part
+       * of it. The counts then belong to that model, and so does the limit
+       * the conversation now runs against.
+       */
+      readonly rerouted?: boolean;
+      /**
        * The whole reply as ordered parts, for the conversation to keep. An
        * adapter that leaves it out has its reply kept as the text it streamed.
        */

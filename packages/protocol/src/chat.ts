@@ -50,9 +50,10 @@ export interface TokenUsage {
 }
 
 /**
- * How full a conversation is after a reply that was kept whole. The provider
- * counted the request and the reply; the next request starts from about
- * their sum, so this is an estimate of where the conversation stands.
+ * About how full a conversation is after a reply. It is the sum of what the
+ * provider counted for the last request and its reply. The next request
+ * starts from about there, but it is an estimate and no guarantee: a provider
+ * may not send all of a reply's thinking back.
  */
 export interface ContextSize {
   readonly usedTokens: number;
@@ -63,8 +64,10 @@ export interface ContextSize {
 export interface ChatSendResult {
   readonly stopReason: StopReason;
   /**
-   * Left out when the counts are unknown, and after a reply that was stopped
-   * or declined, because what the conversation kept was then never counted.
+   * Left out when the counts are unknown; after a reply that was stopped,
+   * declined or not kept, because what the conversation holds was then never
+   * counted; and after a reply written by another model than the one asked
+   * for, whose counts and limit differ.
    */
   readonly context?: ContextSize;
   /**
