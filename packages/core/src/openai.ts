@@ -7,6 +7,7 @@ import {
   type ModelRequest,
   type ModelStopReason,
   type ModelUsage,
+  messageText,
 } from './model.js';
 import { kindForStatus, redact } from './modelErrors.js';
 
@@ -48,9 +49,10 @@ export function createOpenAICompatibleModel(options: OpenAICompatibleModelOption
         const chunks = await client.chat.completions.create(
           {
             model: options.model,
+            // This API takes text only; provider blocks from another adapter are left out.
             messages: request.messages.map((message) => ({
               role: message.role,
-              content: message.text,
+              content: messageText(message),
             })),
             stream: true,
             // Without this the token counts are left out of a streamed reply.

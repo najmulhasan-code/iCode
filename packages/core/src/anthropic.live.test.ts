@@ -14,7 +14,9 @@ describe.skipIf(!enabled)('the Anthropic API', () => {
     const model = createAnthropicModel({ apiKey, maxTokens: 2000 });
     const events: ModelEvent[] = [];
     const request = {
-      messages: [{ role: 'user', text: 'Reply with the single word: ready' }] as const,
+      messages: [
+        { role: 'user', parts: [{ kind: 'text', text: 'Reply with the single word: ready' }] },
+      ] as const,
       signal: new AbortController().signal,
     };
     for await (const event of model.stream(request)) {

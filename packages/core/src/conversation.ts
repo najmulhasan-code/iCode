@@ -1,16 +1,16 @@
-import type { ChatMessage } from './model.js';
+import { type ChatMessage, type MessagePart, messageText, textMessage } from './model.js';
 
 /** One turn in progress: a message from the user that is waiting for its reply. */
 export interface Turn {
   /** What to send to the model: the kept turns followed by this message. */
   readonly messages: readonly ChatMessage[];
   /**
-   * Ends this turn. With a reply that contains text, the user message and the
-   * reply are kept. Without one, the turn leaves no trace and the user
-   * message can be sent again. Only the first call has an effect, and it
-   * never touches a turn that began later.
+   * Ends this turn. With a reply whose parts contain text, the user message
+   * and the reply are kept. Without one, the turn leaves no trace and the
+   * user message can be sent again. Only the first call has an effect, and
+   * it never touches a turn that began later.
    */
-  end(reply?: string): void;
+  end(reply?: readonly MessagePart[]): void;
 }
 
 /**
@@ -20,10 +20,16 @@ export interface Turn {
  * A turn is a user message and the reply to it. It is added only when it
  * ends, and only as a whole, so the stored turns always alternate between the
  * user and the assistant, which every provider accepts.
+ *
+ * The history is append-only: a kept message is never changed or removed.
+ * Providers bind a reply's signed thinking to everything before it, so an
+ * earlier change would make later thinking invalid.
  */
 export class Conversation {
   readonly #messages: ChatMessage[] = [];
   #current: Turn | undefined;
+  /** Notes that model adapters keep about this conversation. */
+  readonly memory = new Map<string, string>();
 
   /** Whether a turn has begun and not yet ended. */
   get busy(): boolean {
@@ -40,7 +46,7 @@ export class Conversation {
     if (this.#current !== undefined) {
       throw new Error('a turn is already in progress');
     }
-    const user: ChatMessage = { role: 'user', text };
+    const user = textMessage('user', text);
     const turn: Turn = {
       messages: [...this.#messages, user],
       end: (reply) => {
@@ -50,8 +56,12 @@ export class Conversation {
           return;
         }
         this.#current = undefined;
-        if (reply !== undefined && reply.trim() !== '') {
-          this.#messages.push(user, { role: 'assistant', text: reply });
+        if (reply === undefined) {
+          return;
+        }
+        const assistant: ChatMessage = { role: 'assistant', parts: [...reply] };
+        if (messageText(assistant).trim() !== '') {
+          this.#messages.push(user, assistant);
         }
       },
     };

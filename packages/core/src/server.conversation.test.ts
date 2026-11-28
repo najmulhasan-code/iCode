@@ -195,11 +195,11 @@ describe('a conversation', () => {
     await client.request('chat/send', { conversationId: 'c1', text: 'third' });
 
     expect(client.seen[2]).toEqual([
-      { role: 'user', text: 'first' },
-      { role: 'assistant', text: 'One.' },
-      { role: 'user', text: 'second' },
-      { role: 'assistant', text: 'Two.' },
-      { role: 'user', text: 'third' },
+      { role: 'user', parts: [{ kind: 'text', text: 'first' }] },
+      { role: 'assistant', parts: [{ kind: 'text', text: 'One.' }] },
+      { role: 'user', parts: [{ kind: 'text', text: 'second' }] },
+      { role: 'assistant', parts: [{ kind: 'text', text: 'Two.' }] },
+      { role: 'user', parts: [{ kind: 'text', text: 'third' }] },
     ]);
     await client.end();
   });
@@ -216,11 +216,13 @@ describe('a conversation', () => {
     await client.request('chat/send', { conversationId: 'c2', text: 'to the second' });
     await client.request('chat/send', { conversationId: 'c1', text: 'again' });
 
-    expect(client.seen[1]).toEqual([{ role: 'user', text: 'to the second' }]);
+    expect(client.seen[1]).toEqual([
+      { role: 'user', parts: [{ kind: 'text', text: 'to the second' }] },
+    ]);
     expect(client.seen[2]).toEqual([
-      { role: 'user', text: 'to the first' },
-      { role: 'assistant', text: 'A.' },
-      { role: 'user', text: 'again' },
+      { role: 'user', parts: [{ kind: 'text', text: 'to the first' }] },
+      { role: 'assistant', parts: [{ kind: 'text', text: 'A.' }] },
+      { role: 'user', parts: [{ kind: 'text', text: 'again' }] },
     ]);
     await client.end();
   });
@@ -235,10 +237,53 @@ describe('a conversation', () => {
     await client.request('chat/send', { conversationId: 'c1', text: 'go on' });
 
     expect(client.seen[1]).toEqual([
-      { role: 'user', text: 'first' },
-      { role: 'assistant', text: 'Half a' },
-      { role: 'user', text: 'go on' },
+      { role: 'user', parts: [{ kind: 'text', text: 'first' }] },
+      { role: 'assistant', parts: [{ kind: 'text', text: 'Half a' }] },
+      { role: 'user', parts: [{ kind: 'text', text: 'go on' }] },
     ]);
+    await client.end();
+  });
+
+  it('keeps the reply as the parts the model returned, provider blocks included', async () => {
+    const thinking = {
+      kind: 'provider' as const,
+      source: {
+        adapter: 'stand-in',
+        endpoint: 'here',
+        block: { type: 'thinking', signature: 's' },
+      },
+    };
+    const parts = [thinking, { kind: 'text' as const, text: 'One.' }];
+    const client = connect([
+      { events: [...say('One.'), { type: 'end', reason: 'end', parts }] },
+      { events: [END] },
+    ]);
+    await client.request('conversation/create');
+    await client.request('chat/send', { conversationId: 'c1', text: 'first' });
+    await client.request('chat/send', { conversationId: 'c1', text: 'second' });
+
+    expect(client.seen[1]?.[1]).toEqual({ role: 'assistant', parts });
+    await client.end();
+  });
+
+  it('keeps nothing of a reply whose parts have no text', async () => {
+    const thinking = {
+      kind: 'provider' as const,
+      source: {
+        adapter: 'stand-in',
+        endpoint: 'here',
+        block: { type: 'thinking', signature: 's' },
+      },
+    };
+    const client = connect([
+      { events: [{ type: 'end', reason: 'end', parts: [thinking] }] },
+      { events: [END] },
+    ]);
+    await client.request('conversation/create');
+    await client.request('chat/send', { conversationId: 'c1', text: 'first' });
+    await client.request('chat/send', { conversationId: 'c1', text: 'again' });
+
+    expect(client.seen[1]).toEqual([{ role: 'user', parts: [{ kind: 'text', text: 'again' }] }]);
     await client.end();
   });
 
@@ -254,9 +299,9 @@ describe('a conversation', () => {
     await client.request('chat/send', { conversationId: 'c1', text: 'go on' });
 
     expect(client.seen[1]).toEqual([
-      { role: 'user', text: 'first' },
-      { role: 'assistant', text: 'Partly' },
-      { role: 'user', text: 'go on' },
+      { role: 'user', parts: [{ kind: 'text', text: 'first' }] },
+      { role: 'assistant', parts: [{ kind: 'text', text: 'Partly' }] },
+      { role: 'user', parts: [{ kind: 'text', text: 'go on' }] },
     ]);
     await client.end();
   });
@@ -291,7 +336,7 @@ describe('a conversation', () => {
     expect(await client.response(id)).toMatchObject(answer);
     await client.request('chat/send', { conversationId: 'c1', text: 'second' });
 
-    expect(client.seen[1]).toEqual([{ role: 'user', text: 'second' }]);
+    expect(client.seen[1]).toEqual([{ role: 'user', parts: [{ kind: 'text', text: 'second' }] }]);
     await client.end();
   });
 

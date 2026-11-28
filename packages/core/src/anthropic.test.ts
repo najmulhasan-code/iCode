@@ -1,9 +1,9 @@
 import { type IncomingHttpHeaders, type ServerResponse, createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_ANTHROPIC_MODEL, createAnthropicModel } from './anthropic.js';
+import { DEFAULT_ANTHROPIC_MODEL, createAnthropicModel, echoAfterFallback } from './anthropic.js';
 import { PROTOCOL_VERSION } from '@icode/protocol';
-import type { Model, ModelEvent } from './model.js';
+import type { ChatMessage, MessagePart, Model, ModelEvent } from './model.js';
 import { serve } from './server.js';
 import { type Behaviour, describeModelContract } from './testing/modelContract.js';
 
@@ -109,11 +109,16 @@ function sendError(response: ServerResponse, status: number, type: string): void
   response.end(JSON.stringify({ type: 'error', error: { type, message: `stand-in ${type}` } }));
 }
 
-async function collect(model: Model, signal?: AbortSignal): Promise<ModelEvent[]> {
+async function collect(
+  model: Model,
+  signal?: AbortSignal,
+  memory?: Map<string, string>,
+): Promise<ModelEvent[]> {
   const events: ModelEvent[] = [];
   const request = {
-    messages: [{ role: 'user', text: 'hi' }] as const,
+    messages: [{ role: 'user', parts: [{ kind: 'text', text: 'hi' }] }] as const,
     signal: signal ?? new AbortController().signal,
+    ...(memory === undefined ? {} : { memory }),
   };
   for await (const event of model.stream(request)) {
     events.push(event);
@@ -149,6 +154,18 @@ describe('a reply', () => {
         reason: 'end',
         usage: { inputTokens: 12, outputTokens: 7 },
         model: 'stand-in-model',
+        parts: [
+          {
+            kind: 'text',
+            text: 'Hello, world',
+            source: {
+              adapter: 'anthropic',
+              endpoint: api.url,
+              model: 'stand-in-model',
+              block: { type: 'text', text: 'Hello, world' },
+            },
+          },
+        ],
       },
     ]);
   });
@@ -268,7 +285,7 @@ describe('a reply', () => {
     const controller = new AbortController();
     const events: ModelEvent[] = [];
     const request = {
-      messages: [{ role: 'user', text: 'hi' }] as const,
+      messages: [{ role: 'user', parts: [{ kind: 'text', text: 'hi' }] }] as const,
       signal: controller.signal,
     };
     for await (const event of modelFor(api.url).stream(request)) {
@@ -399,8 +416,10 @@ describe('a failed request', () => {
     });
 
     const failure = await collect(modelFor(api.url)).catch((error: unknown) => error);
-    const message = failure instanceof Error ? failure.message : '';
-    expect(message).toContain('[redacted]');
+    const message = failure instanceof Error ? failure.message : 'test-key';
+    expect(message).toBe(
+      'the API answered with status 401, error type authentication_error, request id unknown',
+    );
     expect(message).not.toContain('test-key');
     expect(message).not.toContain('abc123456789');
     expect(message).not.toContain('abcdefghijkl');
@@ -509,4 +528,379 @@ describeModelContract('Anthropic adapter', {
       );
     }
   },
+});
+
+/** The events of a reply made of the given blocks, as the API streams them. */
+function blockEvents(
+  blocks: readonly Record<string, unknown>[],
+  options: { model?: string; stopReason?: string } = {},
+): Record<string, unknown>[] {
+  const events: Record<string, unknown>[] = [
+    {
+      type: 'message_start',
+      message: {
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        model: options.model ?? 'model-a',
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 5, output_tokens: 1 },
+      },
+    },
+  ];
+  blocks.forEach((block, index) => {
+    if (block.type === 'text') {
+      events.push({
+        type: 'content_block_start',
+        index,
+        content_block: { type: 'text', text: '' },
+      });
+      events.push({
+        type: 'content_block_delta',
+        index,
+        delta: { type: 'text_delta', text: block.text },
+      });
+    } else if (block.type === 'thinking') {
+      events.push({
+        type: 'content_block_start',
+        index,
+        content_block: { type: 'thinking', thinking: '', signature: '' },
+      });
+      events.push({
+        type: 'content_block_delta',
+        index,
+        delta: { type: 'thinking_delta', thinking: block.thinking },
+      });
+      if (block.signature !== '') {
+        events.push({
+          type: 'content_block_delta',
+          index,
+          delta: { type: 'signature_delta', signature: block.signature },
+        });
+      }
+    } else {
+      events.push({ type: 'content_block_start', index, content_block: block });
+    }
+    events.push({ type: 'content_block_stop', index });
+  });
+  events.push(
+    {
+      type: 'message_delta',
+      delta: { stop_reason: options.stopReason ?? 'end_turn', stop_sequence: null },
+      usage: { output_tokens: 9 },
+    },
+    { type: 'message_stop' },
+  );
+  return events;
+}
+
+/** The parts of the reply that a stream ended with. */
+async function replyParts(model: Model, messages: readonly ChatMessage[]) {
+  const events: ModelEvent[] = [];
+  for await (const event of model.stream({ messages, signal: new AbortController().signal })) {
+    events.push(event);
+  }
+  const end = events.at(-1);
+  if (end?.type !== 'end') {
+    throw new Error('no end event');
+  }
+  return end.parts ?? [];
+}
+
+const QUESTION: ChatMessage = { role: 'user', parts: [{ kind: 'text', text: 'why?' }] };
+const FOLLOW_UP: ChatMessage = { role: 'user', parts: [{ kind: 'text', text: 'and then?' }] };
+
+describe('a reply kept as ordered parts', () => {
+  it('keeps every block in order as received, and drops unsigned thinking and blank text', async () => {
+    const api = await standIn((response) => {
+      startStream(response);
+      writeEvents(
+        response,
+        blockEvents([
+          { type: 'thinking', thinking: '', signature: 'sig-1' },
+          { type: 'redacted_thinking', data: 'opaque' },
+          { type: 'text', text: '\n\n' },
+          { type: 'text', text: 'Because.' },
+          { type: 'thinking', thinking: 'cut off', signature: '' },
+        ]),
+      );
+      response.end();
+    });
+
+    const parts = await replyParts(modelFor(api.url), [QUESTION]);
+    expect(parts.map((part) => (part.kind === 'text' ? `text:${part.text}` : part.kind))).toEqual([
+      'provider',
+      'provider',
+      'text:Because.',
+    ]);
+    expect(parts[0]?.source?.block).toEqual({ type: 'thinking', thinking: '', signature: 'sig-1' });
+    expect(parts[1]?.source?.block).toEqual({ type: 'redacted_thinking', data: 'opaque' });
+  });
+
+  it('sends a kept reply back exactly as received, to the same address', async () => {
+    const api = await standIn((response, _request, count) => {
+      startStream(response);
+      writeEvents(
+        response,
+        count === 1
+          ? blockEvents([
+              { type: 'thinking', thinking: '', signature: 'sig-1' },
+              { type: 'text', text: 'Because.' },
+            ])
+          : blockEvents([{ type: 'text', text: 'Then this.' }]),
+      );
+      response.end();
+    });
+    const model = modelFor(api.url);
+    const parts = await replyParts(model, [QUESTION]);
+    await replyParts(model, [QUESTION, { role: 'assistant', parts }, FOLLOW_UP]);
+
+    expect(api.requests[1]?.body.messages).toEqual([
+      { role: 'user', content: 'why?' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '', signature: 'sig-1' },
+          { type: 'text', text: 'Because.' },
+        ],
+      },
+      { role: 'user', content: 'and then?' },
+    ]);
+  });
+
+  it('sends only the text of a reply that came from another address or adapter', async () => {
+    const api = await standIn((response) => {
+      sendReply(response, ['ok'], 'end_turn');
+    });
+    const elsewhere: MessagePart[] = [
+      {
+        kind: 'provider',
+        source: {
+          adapter: 'anthropic',
+          endpoint: 'https://other.example',
+          block: { type: 'thinking', thinking: '', signature: 'sig-x' },
+        },
+      },
+      {
+        kind: 'text',
+        text: 'Elsewhere.',
+        source: {
+          adapter: 'anthropic',
+          endpoint: 'https://other.example',
+          block: { type: 'text', text: 'Elsewhere.', citations: [] },
+        },
+      },
+    ];
+    await replyParts(modelFor(api.url), [
+      QUESTION,
+      { role: 'assistant', parts: elsewhere },
+      FOLLOW_UP,
+    ]);
+
+    expect((api.requests[0]?.body.messages as unknown[])[1]).toEqual({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Elsewhere.' }],
+    });
+  });
+
+  it('records which model wrote each block when another model takes over', async () => {
+    const api = await standIn((response) => {
+      startStream(response);
+      writeEvents(
+        response,
+        blockEvents([
+          { type: 'thinking', thinking: '', signature: 'sig-a' },
+          { type: 'text', text: 'Partly ' },
+          { type: 'fallback', from: { model: 'model-a' }, to: { model: 'model-b' } },
+          { type: 'text', text: 'and the rest.' },
+        ]),
+      );
+      response.end();
+    });
+
+    const parts = await replyParts(modelFor(api.url), [QUESTION]);
+    expect(parts.map((part) => part.source?.model)).toEqual([
+      'model-a',
+      'model-a',
+      'model-b',
+      'model-b',
+    ]);
+  });
+});
+
+describe('echoAfterFallback', () => {
+  it('leaves everything as it is when no other model took over', () => {
+    const blocks = [
+      { type: 'thinking' as const, thinking: '', signature: 's' },
+      { type: 'text' as const, text: 'x' },
+    ];
+    expect(echoAfterFallback(blocks)).toEqual(blocks);
+  });
+
+  it('keeps text, paired server tool calls and the marker before the last fallback, and all after it', () => {
+    const marker = { type: 'fallback', from: { model: 'a' }, to: { model: 'b' } };
+    const blocks = [
+      { type: 'thinking', thinking: '', signature: 's1' },
+      { type: 'redacted_thinking', data: 'r' },
+      { type: 'text', text: 'before' },
+      { type: 'server_tool_use', id: 'srv_1', name: 'web_search', input: {} },
+      { type: 'web_search_tool_result', tool_use_id: 'srv_1', content: [] },
+      { type: 'server_tool_use', id: 'srv_2', name: 'web_search', input: {} },
+      { type: 'tool_use', id: 'tu_1', name: 'x', input: {} },
+      { type: 'connector_text', text: 'hidden' },
+      { type: 'web_search_tool_result', tool_use_id: 'srv_gone', content: [] },
+      { type: 'unknown_tool_result', tool_use_id: 'srv_1', content: [] },
+      marker,
+      { type: 'thinking', thinking: '', signature: 's2' },
+      { type: 'text', text: 'after' },
+    ] as unknown as Parameters<typeof echoAfterFallback>[0];
+
+    expect(echoAfterFallback(blocks).map((block) => block.type)).toEqual([
+      'text',
+      'server_tool_use',
+      'web_search_tool_result',
+      'fallback',
+      'thinking',
+      'text',
+    ]);
+  });
+});
+
+describe('a request whose replayed thinking no longer matches its conversation', () => {
+  const MISMATCH =
+    'messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation.';
+
+  function mismatchThenReply(message = MISMATCH) {
+    return (response: ServerResponse, _request: SeenRequest, count: number) => {
+      if (count === 1) {
+        response.writeHead(400, { 'content-type': 'application/json' });
+        response.end(
+          JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message } }),
+        );
+        return;
+      }
+      sendReply(response, ['ok'], 'end_turn');
+    };
+  }
+
+  it('is sent once more, asking the API to drop the failing blocks, for a model that checks history', async () => {
+    const api = await standIn(mismatchThenReply());
+    const events = await collect(
+      modelFor(api.url, { model: 'claude-opus-5-5' }),
+      undefined,
+      new Map(),
+    );
+
+    expect(events.at(-1)).toMatchObject({ type: 'end', reason: 'end' });
+    expect(api.requests).toHaveLength(2);
+    expect(api.requests[0]?.body.thinking).toBeUndefined();
+    expect(api.requests[1]?.body.thinking).toEqual({
+      type: 'adaptive',
+      block_binding: { prefix_mismatch_behavior: 'drop_block' },
+    });
+    expect(api.requests[1]?.headers['anthropic-beta']).toContain(
+      'thinking-binding-controls-2026-08-01',
+    );
+    expect(api.requests[1]?.body.messages).toEqual(api.requests[0]?.body.messages);
+  });
+
+  it('keeps asking for the drop in that conversation only, also with a new adapter', async () => {
+    const api = await standIn(mismatchThenReply());
+    const model = modelFor(api.url, { model: 'claude-opus-5-5' });
+    const recovered = new Map<string, string>();
+    await collect(model, undefined, recovered);
+    // Another conversation on the same adapter is not affected.
+    await collect(model, undefined, new Map());
+    // The recovered conversation continues it, even after the adapter was replaced.
+    await collect(modelFor(api.url, { model: 'claude-opus-5-5' }), undefined, recovered);
+
+    expect(api.requests).toHaveLength(4);
+    expect(api.requests[2]?.body.thinking).toBeUndefined();
+    expect(api.requests[3]?.body.thinking).toEqual({
+      type: 'adaptive',
+      block_binding: { prefix_mismatch_behavior: 'drop_block' },
+    });
+  });
+
+  it('asks the API to report mismatches on every request of a model that checks history, and logs them plainly', async () => {
+    const lines: string[] = [];
+    const api = await standIn((response) => {
+      startStream(response);
+      const events = replyEvents(['ok'], 'end_turn');
+      (events[0] as { message: Record<string, unknown> }).message.input_transformations = [
+        {
+          type: 'thinking_mismatch_allowed',
+          reason: 'prefix_binding_mismatch',
+          path: 'messages.1.content.0',
+        },
+        { type: 'PRIVATE <b>', reason: 42, path: 'x y' },
+      ];
+      writeEvents(response, events);
+      response.end();
+    });
+    const model = createAnthropicModel({
+      apiKey: 'test-key',
+      baseURL: api.url,
+      maxRetries: 0,
+      model: 'claude-opus-5-5',
+      log: (line) => lines.push(line),
+    });
+    await collect(model);
+
+    expect(api.requests[0]?.headers['anthropic-beta']).toContain(
+      'thinking-binding-controls-2026-08-01',
+    );
+    expect(api.requests[0]?.body.thinking).toBeUndefined();
+    expect(lines).toEqual([
+      'the API reports a thinking block of the history: thinking_mismatch_allowed (prefix_binding_mismatch) at messages.1.content.0',
+      'the API reports a thinking block of the history: unknown (unknown) at unknown',
+    ]);
+  });
+
+  it('sends a model that is not on the list exactly the request it always got', async () => {
+    const api = await standIn((response) => {
+      sendReply(response, ['ok'], 'end_turn');
+    });
+    await collect(modelFor(api.url, { model: 'claude-opus-4-8' }));
+
+    expect(api.requests[0]?.headers['anthropic-beta']).toBe('server-side-fallback-2026-07-01');
+    expect(api.requests[0]?.body.thinking).toBeUndefined();
+  });
+
+  it("never puts the provider's own error text, which may echo private blocks, into the error", async () => {
+    const echoed =
+      'messages.1.content.0: {"type":"thinking","thinking":"PRIVATE_REPLY_SENTINEL","signature":"PRIVATE_SIGNATURE_SENTINEL"}';
+    const api = await standIn(mismatchThenReply(echoed));
+
+    const failure = await collect(modelFor(api.url, { model: 'claude-opus-5-5' })).catch(
+      (error: unknown) => error,
+    );
+    const message = failure instanceof Error ? failure.message : 'PRIVATE';
+    expect(message).not.toContain('PRIVATE');
+    expect(message).toBe(
+      'the API answered with status 400, error type invalid_request_error, request id unknown',
+    );
+  });
+
+  it('is not retried for any other error', async () => {
+    const api = await standIn(mismatchThenReply('messages: something else is wrong'));
+
+    await expect(collect(modelFor(api.url, { model: 'claude-opus-5-5' }))).rejects.toMatchObject({
+      kind: 'invalid_request',
+    });
+    expect(api.requests).toHaveLength(1);
+  });
+
+  it('is not retried for a model that is not on the list', async () => {
+    const api = await standIn(mismatchThenReply());
+
+    await expect(
+      collect(modelFor(api.url, { model: 'claude-opus-4-8' }), undefined, new Map()),
+    ).rejects.toMatchObject({
+      kind: 'invalid_request',
+    });
+    expect(api.requests).toHaveLength(1);
+  });
 });
