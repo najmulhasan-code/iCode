@@ -159,6 +159,7 @@ const KIND_BY_ERROR_CODE: ReadonlyMap<string, ModelErrorKind> = new Map([
   // Sent with status 429, and waiting does not help: the account has no credit.
   ['insufficient_quota', 'permission'],
   ['invalid_api_key', 'authentication'],
+  ['context_length_exceeded', 'context_overflow'],
   ['model_not_found', 'not_found'],
   ['rate_limit_exceeded', 'rate_limit'],
   ['server_error', 'overloaded'],

@@ -15,6 +15,16 @@ describe('Conversation', () => {
     ]);
   });
 
+  it('says whether it kept the turn', () => {
+    const conversation = new Conversation();
+
+    expect(conversation.begin('a').end()).toBe(false);
+    expect(conversation.begin('b').end([{ kind: 'text', text: ' ' }])).toBe(false);
+    const kept = conversation.begin('c');
+    expect(kept.end([{ kind: 'text', text: 'one' }])).toBe(true);
+    expect(kept.end([{ kind: 'text', text: 'one' }])).toBe(false);
+  });
+
   it('keeps nothing of a turn that ends without a reply', () => {
     const conversation = new Conversation();
     conversation.begin('first').end();

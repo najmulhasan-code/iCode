@@ -62,6 +62,10 @@ const MESSAGE_BY_FAILURE_KIND: ReadonlyMap<string, string> = new Map([
   ['permission', 'The provider refused the request. Check the account and its billing.'],
   ['not_found', 'The provider does not know this model. Check the "iCode: Model" setting.'],
   ['invalid_request', 'The provider rejected the request as invalid.'],
+  [
+    'context_overflow',
+    'This is more than the model accepts in one conversation. Shorten the message, or start a new chat.',
+  ],
   ['rate_limit', 'The provider is limiting requests right now. Try again in a moment.'],
   ['overloaded', 'The provider is having trouble right now. Try again in a moment.'],
   ['connection', 'The provider could not be reached. Check the connection and the address.'],

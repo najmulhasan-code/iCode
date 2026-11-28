@@ -124,11 +124,32 @@ export type ModelEvent =
       /** The model that wrote the reply, when the provider names it. */
       readonly model?: string;
       /**
+       * Set when a model other than the one asked for wrote the reply or part
+       * of it. The counts then belong to that model, and so does the limit
+       * the conversation now runs against.
+       */
+      readonly rerouted?: boolean;
+      /**
        * The whole reply as ordered parts, for the conversation to keep. An
        * adapter that leaves it out has its reply kept as the text it streamed.
        */
       readonly parts?: readonly MessagePart[];
     };
+
+/** What a model accepts, as its provider states it. A limit it does not state is left out. */
+export interface ModelLimits {
+  /** The most input tokens one request may carry. */
+  readonly contextTokens?: number;
+}
+
+/**
+ * The limits, with every number that cannot be a limit left out. A limit is a
+ * count above zero.
+ */
+export function checkedLimits(reported: { readonly contextTokens?: unknown }): ModelLimits {
+  const { contextTokens } = reported;
+  return isCount(contextTokens) && contextTokens > 0 ? { contextTokens } : {};
+}
 
 /**
  * A language model, as the rest of the core sees it. Each provider is reached
@@ -137,6 +158,12 @@ export type ModelEvent =
 export interface Model {
   /** Streams the reply to a conversation. */
   stream(request: ModelRequest): AsyncIterable<ModelEvent>;
+  /**
+   * Asks the provider for the limits of this model. Left out by an adapter
+   * whose API has no way to ask. Rejects with a `ModelError` when the
+   * provider cannot be asked.
+   */
+  limits?(): Promise<ModelLimits>;
 }
 
 /** What went wrong with a model request, in terms a client can act on. */
@@ -145,6 +172,8 @@ export type ModelErrorKind =
   | 'permission'
   | 'not_found'
   | 'invalid_request'
+  /** The conversation is longer than the model accepts. */
+  | 'context_overflow'
   | 'rate_limit'
   | 'overloaded'
   | 'connection'

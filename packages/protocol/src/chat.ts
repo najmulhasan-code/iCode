@@ -49,8 +49,27 @@ export interface TokenUsage {
   readonly cacheWriteTokens?: number;
 }
 
+/**
+ * About how full a conversation is after a reply. It is the sum of what the
+ * provider counted for the last request and its reply. The next request
+ * starts from about there, but it is an estimate and no guarantee: a provider
+ * may not send all of a reply's thinking back.
+ */
+export interface ContextSize {
+  readonly usedTokens: number;
+  /** The most input the model accepts in one request, when its provider says. */
+  readonly limitTokens?: number;
+}
+
 export interface ChatSendResult {
   readonly stopReason: StopReason;
+  /**
+   * Left out when the counts are unknown; after a reply that was stopped,
+   * declined or not kept, because what the conversation holds was then never
+   * counted; and after a reply written by another model than the one asked
+   * for, whose counts and limit differ.
+   */
+  readonly context?: ContextSize;
   /**
    * Left out when the provider reported no counts that can be trusted. A
    * stopped reply has them only if the provider had sent them before the stop.
@@ -114,6 +133,9 @@ export const CoreErrorCode = {
 
 /** Carried in the `data` of a `ModelRequestFailed` error. */
 export interface ModelRequestFailedData {
-  /** The kind of failure, for example `authentication` or `rate_limit`. */
+  /**
+   * The kind of failure, for example `authentication` or `rate_limit`.
+   * `context_overflow` means the conversation is longer than the model accepts.
+   */
   readonly kind: string;
 }

@@ -252,6 +252,25 @@ describe('OpenAI-compatible adapter', () => {
     await expect(collect(modelFor(api.url))).rejects.toMatchObject({ kind: 'unexpected' });
   });
 
+  it('reports a conversation longer than the model accepts as its own kind of failure', async () => {
+    const api = await standIn((response) => {
+      sendError(response, 400, {
+        type: 'invalid_request_error',
+        code: 'context_length_exceeded',
+      });
+    });
+
+    await expect(collect(modelFor(api.url))).rejects.toMatchObject({
+      name: 'ModelError',
+      kind: 'context_overflow',
+      status: 400,
+    });
+  });
+
+  it('has no way to ask for the limits of a model', () => {
+    expect('limits' in modelFor('http://127.0.0.1:9')).toBe(false);
+  });
+
   it('reports an exhausted quota as a permission problem and does not retry it away', async () => {
     const api = await standIn((response) => {
       sendError(response, 429, { type: 'insufficient_quota', code: 'insufficient_quota' });

@@ -7,7 +7,13 @@ import {
   parseMessage,
 } from '@icode/protocol';
 import { describe, expect, it } from 'vitest';
-import { type ChatMessage, type Model, ModelError, type ModelEvent } from './model.js';
+import {
+  type ChatMessage,
+  type Model,
+  ModelError,
+  type ModelEvent,
+  type ModelLimits,
+} from './model.js';
 import { serve } from './server.js';
 
 const INITIALIZE = {
@@ -32,9 +38,14 @@ const END: ModelEvent = { type: 'end', reason: 'end' };
  * A core with a model that follows one script per request and records the
  * messages each request carried. Requests are sent one after another.
  */
-function connect(scripts: readonly Script[]) {
+function connect(
+  scripts: readonly Script[],
+  limits?: () => Promise<ModelLimits>,
+  now?: () => number,
+) {
   const seen: (readonly ChatMessage[])[] = [];
   const model: Model = {
+    ...(limits === undefined ? {} : { limits }),
     async *stream(request) {
       const script = scripts[seen.length];
       seen.push(request.messages);
@@ -97,6 +108,7 @@ function connect(scripts: readonly Script[]) {
     },
     info: { name: 'test-core', version: '0' },
     log: () => undefined,
+    ...(now === undefined ? {} : { now }),
   });
   const send = (message: object): void => {
     pending.push(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
@@ -355,6 +367,162 @@ describe('a conversation', () => {
       result: { stopReason: 'end' },
     });
     expect(client.seen).toHaveLength(2);
+    await client.end();
+  });
+});
+
+describe('the size of a conversation', () => {
+  const counted: ModelEvent = {
+    type: 'end',
+    reason: 'end',
+    usage: { inputTokens: 900, outputTokens: 100 },
+  };
+  const send = { conversationId: 'c1', text: 'hi' };
+  const contextOf = (answer: Message): unknown =>
+    (answer as { result?: { context?: unknown } }).result?.context;
+
+  it('is told after a reply, with the limit the provider stated', async () => {
+    const client = connect([{ events: [...say('ok'), counted] }], () =>
+      Promise.resolve({ contextTokens: 200_000 }),
+    );
+    await client.request('conversation/create');
+
+    expect(contextOf(await client.request('chat/send', send))).toEqual({
+      usedTokens: 1000,
+      limitTokens: 200_000,
+    });
+    await client.end();
+  });
+
+  it('is told without a limit when the model has no way to ask for one', async () => {
+    const client = connect([{ events: [...say('ok'), counted] }]);
+    await client.request('conversation/create');
+
+    expect(contextOf(await client.request('chat/send', send))).toEqual({ usedTokens: 1000 });
+    await client.end();
+  });
+
+  it('asks for the limits once, and after a passing failure only when a minute has gone by', async () => {
+    let asked = 0;
+    let time = 1_000_000;
+    const reply: Script = { events: [...say('ok'), counted] };
+    const client = connect(
+      [reply, reply, reply, reply],
+      () => {
+        asked += 1;
+        return asked === 1
+          ? Promise.reject(new ModelError('overloaded', 'detail', 529))
+          : Promise.resolve({ contextTokens: 200_000 });
+      },
+      () => time,
+    );
+    await client.request('conversation/create');
+
+    expect(contextOf(await client.request('chat/send', send))).toEqual({ usedTokens: 1000 });
+    time += 59_000;
+    expect(contextOf(await client.request('chat/send', send))).toEqual({ usedTokens: 1000 });
+    expect(asked).toBe(1);
+    time += 1_000;
+    expect(contextOf(await client.request('chat/send', send))).toMatchObject({
+      limitTokens: 200_000,
+    });
+    await client.request('chat/send', send);
+    expect(asked).toBe(2);
+    await client.end();
+  });
+
+  it.each(['not_found', 'authentication', 'permission', 'invalid_request', 'unexpected'] as const)(
+    'does not ask again after a failure of the kind %s',
+    async (kind) => {
+      let asked = 0;
+      let time = 1_000_000;
+      const reply: Script = { events: [...say('ok'), counted] };
+      const client = connect(
+        [reply, reply],
+        () => {
+          asked += 1;
+          return Promise.reject(new ModelError(kind, 'detail'));
+        },
+        () => time,
+      );
+      await client.request('conversation/create');
+
+      await client.request('chat/send', send);
+      time += 3_600_000;
+      expect(contextOf(await client.request('chat/send', send))).toEqual({ usedTokens: 1000 });
+      expect(asked).toBe(1);
+      await client.end();
+    },
+  );
+
+  it('is not told after a reply that was not kept, and the next reply counts afresh', async () => {
+    const thinkingOnly: ModelEvent = {
+      type: 'end',
+      reason: 'max_tokens',
+      usage: { inputTokens: 90_000, outputTokens: 10_000 },
+    };
+    const client = connect([{ events: [thinkingOnly] }, { events: [...say('ok'), counted] }], () =>
+      Promise.resolve({ contextTokens: 200_000 }),
+    );
+    await client.request('conversation/create');
+
+    expect(contextOf(await client.request('chat/send', send))).toBeUndefined();
+    expect(contextOf(await client.request('chat/send', send))).toEqual({
+      usedTokens: 1000,
+      limitTokens: 200_000,
+    });
+    expect(client.seen[1]).toHaveLength(1);
+    await client.end();
+  });
+
+  it('is not told after a reply that another model wrote, though its counts are', async () => {
+    const elsewhere: ModelEvent = { ...counted, model: 'another-model', rerouted: true };
+    const client = connect([{ events: [...say('ok'), elsewhere] }], () =>
+      Promise.resolve({ contextTokens: 200_000 }),
+    );
+    await client.request('conversation/create');
+
+    const answer = await client.request('chat/send', send);
+    expect(contextOf(answer)).toBeUndefined();
+    expect(answer).toMatchObject({ result: { usage: { inputTokens: 900, outputTokens: 100 } } });
+    await client.end();
+  });
+
+  it('leaves out a stated limit that cannot be one', async () => {
+    const client = connect([{ events: [...say('ok'), counted] }], () =>
+      Promise.resolve({ contextTokens: -1 }),
+    );
+    await client.request('conversation/create');
+
+    expect(contextOf(await client.request('chat/send', send))).toEqual({ usedTokens: 1000 });
+    await client.end();
+  });
+
+  it.each<[string, ModelEvent]>([
+    ['the provider counted nothing', END],
+    [
+      'the reply was declined',
+      { type: 'end', reason: 'refusal', usage: { inputTokens: 900, outputTokens: 100 } },
+    ],
+  ])('is not told when %s', async (_name, end) => {
+    const client = connect([{ events: [...say('ok'), end] }], () =>
+      Promise.resolve({ contextTokens: 200_000 }),
+    );
+    await client.request('conversation/create');
+
+    expect(contextOf(await client.request('chat/send', send))).toBeUndefined();
+    await client.end();
+  });
+
+  it('is not told for a reply that was stopped', async () => {
+    const client = connect([{ events: say('Partly'), hang: true }], () =>
+      Promise.resolve({ contextTokens: 200_000 }),
+    );
+    await client.request('conversation/create');
+    const id = client.start('c1', 'first');
+    client.send({ method: '$/cancel', params: { id } });
+
+    expect(contextOf(await client.response(id))).toBeUndefined();
     await client.end();
   });
 });

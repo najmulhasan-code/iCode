@@ -37,7 +37,7 @@ async function standIn(handler: Handler) {
         method: request.method,
         url: request.url,
         headers: request.headers,
-        body: JSON.parse(text) as Record<string, unknown>,
+        body: (text === '' ? {} : JSON.parse(text)) as Record<string, unknown>,
       };
       requests.push(seen);
       handler(response, seen, requests.length);
@@ -145,7 +145,7 @@ describe('a reply', () => {
       sendReply(response, ['Hello', ', ', 'world'], 'end_turn');
     });
 
-    expect(await collect(modelFor(api.url))).toEqual([
+    expect(await collect(modelFor(api.url, { model: 'stand-in-model' }))).toEqual([
       { type: 'text', text: 'Hello' },
       { type: 'text', text: ', ' },
       { type: 'text', text: 'world' },
@@ -304,10 +304,32 @@ describe('a reply', () => {
       response.end();
     });
 
-    expect((await collect(modelFor(api.url))).at(-1)).toMatchObject({
+    expect((await collect(modelFor(api.url, { model: 'first-model' }))).at(-1)).toMatchObject({
       type: 'end',
       model: 'third-model',
+      rerouted: true,
     });
+  });
+
+  it.each<[string, string, string, boolean]>([
+    ['the model asked for', 'model-a', 'model-a', false],
+    ['the dated name of the model asked for', 'model-a', 'model-a-20260101', false],
+    ['another model, with no marker in this reply', 'model-a', 'model-b', true],
+    ['a model whose name only begins the same', 'model-a', 'model-ab', true],
+    ['a later version with a longer name', 'claude-sonnet-5', 'claude-sonnet-5-5', true],
+    ['a name with a suffix that is not a date', 'model-a', 'model-a-other', true],
+    ['a name with a date that is too short', 'model-a', 'model-a-2026', true],
+    ['a later version with its own date', 'claude-sonnet-5', 'claude-sonnet-5-5-20260101', true],
+  ])('says whether another model answered: %s', async (_name, asked, served, rerouted) => {
+    const api = await standIn((response) => {
+      startStream(response);
+      writeEvents(response, replyEvents(['ok'], 'end_turn', served));
+      response.end();
+    });
+
+    const end = (await collect(modelFor(api.url, { model: asked }))).at(-1);
+    expect(end).toMatchObject({ type: 'end', model: served });
+    expect(end?.type === 'end' && end.rerouted === true).toBe(rerouted);
   });
 
   it('leaves out content that is not text', async () => {
@@ -373,6 +395,86 @@ describe('a reply', () => {
     }
 
     expect(events).toEqual([{ type: 'text', text: 'partial' }]);
+  });
+});
+
+describe('the limits of a model', () => {
+  const answer = (response: ServerResponse, info: object): void => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ id: 'model-a', type: 'model', ...info }));
+  };
+
+  it('are asked from the provider by the model name', async () => {
+    const api = await standIn((response) => {
+      answer(response, { max_input_tokens: 1_000_000, max_tokens: 128_000 });
+    });
+
+    expect(await modelFor(api.url, { model: 'model-a' }).limits?.()).toEqual({
+      contextTokens: 1_000_000,
+    });
+    expect(api.requests[0]?.method).toBe('GET');
+    expect(api.requests[0]?.url).toMatch(/^\/v1\/models\/model-a/);
+  });
+
+  it.each<[string, unknown]>([
+    ['is not stated', null],
+    ['is zero', 0],
+    ['is negative', -5],
+    ['is text', '1000000'],
+  ])('leave out an input limit that %s', async (_name, value) => {
+    const api = await standIn((response) => {
+      answer(response, { max_input_tokens: value });
+    });
+
+    expect(await modelFor(api.url).limits?.()).toEqual({});
+  });
+
+  it('are reported as a failure, without provider text, when the provider cannot say', async () => {
+    const api = await standIn((response) => {
+      sendError(response, 404, 'not_found_error');
+    });
+
+    const failure = await modelFor(api.url)
+      .limits?.()
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({ name: 'ModelError', kind: 'not_found', status: 404 });
+    expect((failure as Error).message).not.toContain('stand-in');
+  });
+});
+
+describe('a conversation longer than the model accepts', () => {
+  const refuse = (response: ServerResponse, status: number, type: string, message: string) => {
+    response.writeHead(status, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ type: 'error', error: { type, message } }));
+  };
+
+  it('is reported as its own kind of failure, without the provider wording', async () => {
+    const api = await standIn((response) => {
+      refuse(
+        response,
+        400,
+        'invalid_request_error',
+        'prompt is too long: 1000001 tokens > 1000000',
+      );
+    });
+
+    const failure = await collect(modelFor(api.url)).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ name: 'ModelError', kind: 'context_overflow', status: 400 });
+    expect((failure as Error).message).not.toContain('too long');
+  });
+
+  it.each<[string, number, string, string]>([
+    ['another invalid request', 400, 'invalid_request_error', 'max_tokens: must be positive'],
+    ['the same words with another status', 413, 'request_too_large', 'prompt is too long'],
+  ])('is not confused with %s', async (_name, status, type, message) => {
+    const api = await standIn((response) => {
+      refuse(response, status, type, message);
+    });
+
+    await expect(collect(modelFor(api.url))).rejects.toMatchObject({
+      name: 'ModelError',
+      kind: 'invalid_request',
+    });
   });
 });
 
