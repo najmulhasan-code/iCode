@@ -22,6 +22,7 @@ import {
   SET_MODEL_METHOD,
   type SetModelParams,
   type StopReason,
+  type TokenUsage,
   encodeMessage,
   isCancelParams,
   isChatSendParams,
@@ -34,7 +35,13 @@ import {
 } from '@icode/protocol';
 import { randomUUID } from 'node:crypto';
 import { Conversation } from './conversation.js';
-import { type MessagePart, type Model, ModelConfigError, ModelError } from './model.js';
+import {
+  type MessagePart,
+  type Model,
+  ModelConfigError,
+  ModelError,
+  type ModelUsage,
+} from './model.js';
 
 export interface ServerOptions {
   /** Text from the client, in chunks of any size. */
@@ -64,6 +71,27 @@ export interface ServerOptions {
 }
 
 /** Resolves when the signal aborts. */
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * The counts a client is told. A provider's server can send anything, so a
+ * number that is not a count is left out, and with it the whole usage when
+ * the input or the output is not one.
+ */
+function toTokenUsage(usage: ModelUsage): TokenUsage | undefined {
+  if (!isCount(usage.inputTokens) || !isCount(usage.outputTokens)) {
+    return undefined;
+  }
+  return {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    ...(isCount(usage.cacheReadTokens) ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+    ...(isCount(usage.cacheWriteTokens) ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
+  };
+}
+
 function whenAborted(signal: AbortSignal): Promise<'aborted'> {
   return new Promise((resolve) => {
     if (signal.aborted) {
@@ -244,6 +272,7 @@ export async function serve(options: ServerOptions): Promise<void> {
     let written = '';
     let stopReason: StopReason | undefined;
     let parts: readonly MessagePart[] | undefined;
+    let usage: ModelUsage | undefined;
     try {
       const stream = model.stream({
         messages: turn.messages,
@@ -274,14 +303,17 @@ export async function serve(options: ServerOptions): Promise<void> {
           } else {
             stopReason = step.value.reason;
             parts = step.value.parts;
+            usage = step.value.usage;
           }
         }
       } finally {
         // Not awaited: a provider that ignores cancellation must not hold the request open.
         void Promise.resolve(events.return?.()).catch(() => undefined);
       }
+      const counts = usage === undefined ? undefined : toTokenUsage(usage);
       const result: ChatSendResult = {
         stopReason: controller.signal.aborted ? 'cancelled' : stopReason,
+        ...(counts === undefined ? {} : { usage: counts }),
       };
       turn.end(keptReply(result.stopReason, written, parts));
       await reply(request.id, result);

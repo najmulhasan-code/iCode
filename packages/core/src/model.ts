@@ -59,10 +59,18 @@ export interface ModelRequest {
  */
 export type ModelStopReason = 'end' | 'max_tokens' | 'refusal';
 
-/** Tokens a request consumed, when the provider reports them. */
+/**
+ * Tokens a request consumed, when the provider reports them. Providers count
+ * cached input differently, so every adapter converts to this one meaning.
+ */
 export interface ModelUsage {
+  /** All input the request carried, including what was read from or written to the cache. */
   readonly inputTokens: number;
   readonly outputTokens: number;
+  /** The part of the input read from the provider's cache, when it says. */
+  readonly cacheReadTokens?: number | undefined;
+  /** The part of the input written to the provider's cache, when it says. */
+  readonly cacheWriteTokens?: number | undefined;
 }
 
 /**

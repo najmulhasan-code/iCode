@@ -360,6 +360,41 @@ describe('a conversation', () => {
 });
 
 describe('chat/send', () => {
+  it('answers with the token counts the provider reported', async () => {
+    const usage = { inputTokens: 132, outputTokens: 7, cacheReadTokens: 100, cacheWriteTokens: 20 };
+    const client = connect([{ events: [...say('ok'), { type: 'end', reason: 'end', usage }] }]);
+    await client.request('conversation/create');
+
+    expect(await client.request('chat/send', { conversationId: 'c1', text: 'hi' })).toMatchObject({
+      result: { stopReason: 'end', usage },
+    });
+    await client.end();
+  });
+
+  it.each<[string, object, object | undefined]>([
+    ['no usage at all', {}, undefined],
+    ['an input that is not a count', { usage: { inputTokens: -1, outputTokens: 7 } }, undefined],
+    [
+      'an output that is not a number',
+      { usage: { inputTokens: 5, outputTokens: 'many' } },
+      undefined,
+    ],
+    [
+      'a cache count that is not a count',
+      { usage: { inputTokens: 5, outputTokens: 7, cacheReadTokens: 1.5 } },
+      { inputTokens: 5, outputTokens: 7 },
+    ],
+  ])('tells only real counts after %s', async (_name, extra, expected) => {
+    const end = { type: 'end', reason: 'end', ...extra } as ModelEvent;
+    const client = connect([{ events: [...say('ok'), end] }]);
+    await client.request('conversation/create');
+
+    const answer = await client.request('chat/send', { conversationId: 'c1', text: 'hi' });
+    expect(answer).toMatchObject({ result: { stopReason: 'end' } });
+    expect((answer as { result: { usage?: object } }).result.usage).toEqual(expected);
+    await client.end();
+  });
+
   it('is refused for a conversation that does not exist', async () => {
     const client = connect([]);
 

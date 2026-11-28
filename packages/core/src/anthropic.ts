@@ -8,6 +8,7 @@ import {
   type ModelEvent,
   type ModelRequest,
   type ModelStopReason,
+  type ModelUsage,
   messageText,
 } from './model.js';
 import { kindForStatus } from './modelErrors.js';
@@ -87,8 +88,8 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
     async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
       const messages = toAnthropicMessages(request.messages, endpoint);
       let servedBy: string | undefined;
-      let inputTokens = 0;
-      let outputTokens = 0;
+      // As the API counts them: `input` leaves out what the cache served or stored.
+      const counted: Counted = { input: 0, output: 0, cacheRead: null, cacheWrite: null };
       let stopReason: Anthropic.Beta.BetaStopReason | null = null;
       /** The model that wrote each block, by its index in the reply. */
       const writer = new Map<number, string>();
@@ -109,6 +110,10 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
               // not answer with an error.
               betas: checked ? [FALLBACK_BETA, BINDING_BETA] : [FALLBACK_BETA],
               fallbacks: 'default',
+              // The API places the cache mark on the last block that can carry
+              // one. A request only ever grows, so each one reads what the one
+              // before it stored.
+              cache_control: { type: 'ephemeral' },
               ...(recover
                 ? {
                     thinking: {
@@ -124,7 +129,9 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
           for await (const event of events) {
             if (event.type === 'message_start') {
               servedBy = event.message.model;
-              inputTokens = event.message.usage.input_tokens;
+              counted.input = event.message.usage.input_tokens;
+              counted.cacheRead = event.message.usage.cache_read_input_tokens ?? null;
+              counted.cacheWrite = event.message.usage.cache_creation_input_tokens ?? null;
             } else if (event.type === 'content_block_start') {
               // The API switched to another model after a decline. From here on
               // that model writes the reply. There can be several switches.
@@ -141,8 +148,10 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
               }
             } else if (event.type === 'message_delta') {
               stopReason = event.delta.stop_reason;
-              outputTokens = event.usage.output_tokens;
-              inputTokens = event.usage.input_tokens ?? inputTokens;
+              counted.output = event.usage.output_tokens;
+              counted.input = event.usage.input_tokens ?? counted.input;
+              counted.cacheRead = event.usage.cache_read_input_tokens ?? counted.cacheRead;
+              counted.cacheWrite = event.usage.cache_creation_input_tokens ?? counted.cacheWrite;
             }
           }
           if (!request.signal.aborted) {
@@ -179,11 +188,32 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
       yield {
         type: 'end',
         reason: toStopReason(stopReason),
-        usage: { inputTokens, outputTokens },
+        usage: toUsage(counted),
         ...(servedBy === undefined ? {} : { model: servedBy }),
         ...(reply === undefined ? {} : { parts: toParts(reply.content, endpoint, writer) }),
       };
     },
+  };
+}
+
+/** Token counts as the API reports them while a reply streams. */
+interface Counted {
+  input: number;
+  output: number;
+  cacheRead: number | null;
+  cacheWrite: number | null;
+}
+
+/**
+ * This API counts cached input apart from the rest, so the whole input of a
+ * request is the sum of the three. A cache count it did not report is left out.
+ */
+function toUsage(counted: Counted): ModelUsage {
+  return {
+    inputTokens: counted.input + (counted.cacheRead ?? 0) + (counted.cacheWrite ?? 0),
+    outputTokens: counted.output,
+    ...(counted.cacheRead === null ? {} : { cacheReadTokens: counted.cacheRead }),
+    ...(counted.cacheWrite === null ? {} : { cacheWriteTokens: counted.cacheWrite }),
   };
 }
 

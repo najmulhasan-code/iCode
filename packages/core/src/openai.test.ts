@@ -131,6 +131,30 @@ describe('OpenAI-compatible adapter', () => {
     });
   });
 
+  it('reports the cached part of the input when the server names it', async () => {
+    const api = await standIn((response) => {
+      startStream(response);
+      writeChunks(response, [
+        textChunk('ok'),
+        finishChunk('stop'),
+        {
+          ...usageChunk,
+          usage: {
+            prompt_tokens: 120,
+            completion_tokens: 7,
+            total_tokens: 127,
+            prompt_tokens_details: { cached_tokens: 100 },
+          },
+        },
+      ]);
+      finishStream(response);
+    });
+
+    expect((await collect(modelFor(api.url))).at(-1)).toMatchObject({
+      usage: { inputTokens: 120, outputTokens: 7, cacheReadTokens: 100 },
+    });
+  });
+
   it('leaves the usage out when the server does not report it', async () => {
     const api = await standIn((response) => {
       startStream(response);

@@ -33,8 +33,24 @@ export interface ChatSendParams {
  */
 export type StopReason = 'end' | 'max_tokens' | 'refusal' | 'cancelled';
 
+/**
+ * Tokens one model request consumed, as the provider counted them. The core
+ * never estimates these numbers.
+ */
+export interface TokenUsage {
+  /** All input the request carried, including what was read from or written to the cache. */
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  /** The part of the input read from the provider's cache, when it says. */
+  readonly cacheReadTokens?: number;
+  /** The part of the input written to the provider's cache, when it says. */
+  readonly cacheWriteTokens?: number;
+}
+
 export interface ChatSendResult {
   readonly stopReason: StopReason;
+  /** Left out when the provider reported no counts or the reply never ended. */
+  readonly usage?: TokenUsage;
 }
 
 export interface ChatDeltaParams {

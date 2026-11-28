@@ -67,9 +67,12 @@ export function createOpenAICompatibleModel(options: OpenAICompatibleModelOption
             servedBy = loose.model;
           }
           if (loose.usage) {
+            // This API counts cached input inside the prompt tokens already.
+            const cached = loose.usage.prompt_tokens_details?.cached_tokens;
             usage = {
               inputTokens: loose.usage.prompt_tokens ?? 0,
               outputTokens: loose.usage.completion_tokens ?? 0,
+              ...(typeof cached === 'number' ? { cacheReadTokens: cached } : {}),
             };
           }
           const choice = loose.choices?.[0];
@@ -113,7 +116,11 @@ export function createOpenAICompatibleModel(options: OpenAICompatibleModelOption
 /** A stream chunk as a compatible server may really send it. */
 interface LooseChunk {
   readonly model?: unknown;
-  readonly usage?: { readonly prompt_tokens?: number; readonly completion_tokens?: number } | null;
+  readonly usage?: {
+    readonly prompt_tokens?: number;
+    readonly completion_tokens?: number;
+    readonly prompt_tokens_details?: { readonly cached_tokens?: unknown } | null;
+  } | null;
   readonly choices?: readonly (
     | {
         readonly delta?: { readonly content?: unknown; readonly refusal?: unknown } | null;
