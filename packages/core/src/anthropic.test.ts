@@ -316,6 +316,10 @@ describe('a reply', () => {
     ['the dated name of the model asked for', 'model-a', 'model-a-20260101', false],
     ['another model, with no marker in this reply', 'model-a', 'model-b', true],
     ['a model whose name only begins the same', 'model-a', 'model-ab', true],
+    ['a later version with a longer name', 'claude-sonnet-5', 'claude-sonnet-5-5', true],
+    ['a name with a suffix that is not a date', 'model-a', 'model-a-other', true],
+    ['a name with a date that is too short', 'model-a', 'model-a-2026', true],
+    ['a later version with its own date', 'claude-sonnet-5', 'claude-sonnet-5-5-20260101', true],
   ])('says whether another model answered: %s', async (_name, asked, served, rerouted) => {
     const api = await standIn((response) => {
       startStream(response);

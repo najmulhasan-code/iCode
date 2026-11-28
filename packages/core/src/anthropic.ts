@@ -237,11 +237,17 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
 }
 
 /**
- * Whether the model that answered is the one asked for. The API answers a
- * name without a date with the dated name of the same model.
+ * Whether the model that answered is surely the one asked for: the same
+ * name, or that name followed by a date of eight digits, which is how the
+ * API names the dated form of a model asked for without a date. Any other
+ * difference counts as another model, because a longer name can be a later
+ * version.
  */
 function isSameModel(asked: string, served: string): boolean {
-  return served === asked || served.startsWith(`${asked}-`);
+  if (served === asked) {
+    return true;
+  }
+  return served.startsWith(`${asked}-`) && /^\d{8}$/.test(served.slice(asked.length + 1));
 }
 
 /** Token counts as the API reports them while a reply streams. */
