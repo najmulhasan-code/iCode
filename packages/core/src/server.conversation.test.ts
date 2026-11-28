@@ -7,7 +7,13 @@ import {
   parseMessage,
 } from '@icode/protocol';
 import { describe, expect, it } from 'vitest';
-import { type ChatMessage, type Model, ModelError, type ModelEvent } from './model.js';
+import {
+  type ChatMessage,
+  type Model,
+  ModelError,
+  type ModelEvent,
+  type ModelLimits,
+} from './model.js';
 import { serve } from './server.js';
 
 const INITIALIZE = {
@@ -32,9 +38,10 @@ const END: ModelEvent = { type: 'end', reason: 'end' };
  * A core with a model that follows one script per request and records the
  * messages each request carried. Requests are sent one after another.
  */
-function connect(scripts: readonly Script[]) {
+function connect(scripts: readonly Script[], limits?: () => Promise<ModelLimits>) {
   const seen: (readonly ChatMessage[])[] = [];
   const model: Model = {
+    ...(limits === undefined ? {} : { limits }),
     async *stream(request) {
       const script = scripts[seen.length];
       seen.push(request.messages);
@@ -355,6 +362,102 @@ describe('a conversation', () => {
       result: { stopReason: 'end' },
     });
     expect(client.seen).toHaveLength(2);
+    await client.end();
+  });
+});
+
+describe('the size of a conversation', () => {
+  const counted: ModelEvent = {
+    type: 'end',
+    reason: 'end',
+    usage: { inputTokens: 900, outputTokens: 100 },
+  };
+  const send = { conversationId: 'c1', text: 'hi' };
+  const contextOf = (answer: Message): unknown =>
+    (answer as { result?: { context?: unknown } }).result?.context;
+
+  it('is told after a reply, with the limit the provider stated', async () => {
+    const client = connect([{ events: [...say('ok'), counted] }], () =>
+      Promise.resolve({ contextTokens: 200_000 }),
+    );
+    await client.request('conversation/create');
+
+    expect(contextOf(await client.request('chat/send', send))).toEqual({
+      usedTokens: 1000,
+      limitTokens: 200_000,
+    });
+    await client.end();
+  });
+
+  it('is told without a limit when the model has no way to ask for one', async () => {
+    const client = connect([{ events: [...say('ok'), counted] }]);
+    await client.request('conversation/create');
+
+    expect(contextOf(await client.request('chat/send', send))).toEqual({ usedTokens: 1000 });
+    await client.end();
+  });
+
+  it('asks for the limits once, and again only after a failed answer', async () => {
+    let asked = 0;
+    const client = connect(
+      [
+        { events: [...say('ok'), counted] },
+        { events: [...say('ok'), counted] },
+        { events: [...say('ok'), counted] },
+      ],
+      () => {
+        asked += 1;
+        return asked === 1
+          ? Promise.reject(new ModelError('overloaded', 'detail', 529))
+          : Promise.resolve({ contextTokens: 200_000 });
+      },
+    );
+    await client.request('conversation/create');
+
+    expect(contextOf(await client.request('chat/send', send))).toEqual({ usedTokens: 1000 });
+    expect(contextOf(await client.request('chat/send', send))).toMatchObject({
+      limitTokens: 200_000,
+    });
+    await client.request('chat/send', send);
+    expect(asked).toBe(2);
+    await client.end();
+  });
+
+  it('leaves out a stated limit that cannot be one', async () => {
+    const client = connect([{ events: [...say('ok'), counted] }], () =>
+      Promise.resolve({ contextTokens: -1 }),
+    );
+    await client.request('conversation/create');
+
+    expect(contextOf(await client.request('chat/send', send))).toEqual({ usedTokens: 1000 });
+    await client.end();
+  });
+
+  it.each<[string, ModelEvent]>([
+    ['the provider counted nothing', END],
+    [
+      'the reply was declined',
+      { type: 'end', reason: 'refusal', usage: { inputTokens: 900, outputTokens: 100 } },
+    ],
+  ])('is not told when %s', async (_name, end) => {
+    const client = connect([{ events: [...say('ok'), end] }], () =>
+      Promise.resolve({ contextTokens: 200_000 }),
+    );
+    await client.request('conversation/create');
+
+    expect(contextOf(await client.request('chat/send', send))).toBeUndefined();
+    await client.end();
+  });
+
+  it('is not told for a reply that was stopped', async () => {
+    const client = connect([{ events: say('Partly'), hang: true }], () =>
+      Promise.resolve({ contextTokens: 200_000 }),
+    );
+    await client.request('conversation/create');
+    const id = client.start('c1', 'first');
+    client.send({ method: '$/cancel', params: { id } });
+
+    expect(contextOf(await client.response(id))).toBeUndefined();
     await client.end();
   });
 });

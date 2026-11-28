@@ -6,9 +6,11 @@ import {
   ModelError,
   type ModelErrorKind,
   type ModelEvent,
+  type ModelLimits,
   type ModelRequest,
   type ModelStopReason,
   type ModelUsage,
+  checkedLimits,
   checkedUsage,
   isCount,
   messageText,
@@ -69,6 +71,15 @@ const BINDING_BETA = 'thinking-binding-controls-2026-08-01';
 /** The API's wording when a replayed thinking block no longer matches its conversation. */
 const PREFIX_MISMATCH = /bound to a different conversation/i;
 
+/**
+ * The API's wording when the input alone is longer than the model accepts. It
+ * answers with status 400 and no code of its own for this case.
+ */
+const TOO_LONG = /prompt is too long/i;
+
+/** A provider that does not answer a question about a model must not hold anything up. */
+const LIMITS_TIMEOUT_MS = 10_000;
+
 /** Creates a model that talks to the Anthropic Messages API. */
 export function createAnthropicModel(options: AnthropicModelOptions): Model {
   const client = new Anthropic({
@@ -92,6 +103,18 @@ export function createAnthropicModel(options: AnthropicModelOptions): Model {
   const dropNote = `${ADAPTER}|${endpoint}|drop-mismatched`;
 
   return {
+    async limits(): Promise<ModelLimits> {
+      try {
+        const info = await client.models.retrieve(
+          model,
+          {},
+          { timeout: LIMITS_TIMEOUT_MS, maxRetries: 0 },
+        );
+        return checkedLimits({ contextTokens: info.max_input_tokens });
+      } catch (error) {
+        throw toModelError(error);
+      }
+    },
     async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
       const messages = toAnthropicMessages(request.messages, endpoint);
       let servedBy: string | undefined;
@@ -426,7 +449,11 @@ function toModelError(error: unknown): ModelError {
     const status = typeof rawStatus === 'number' ? rawStatus : undefined;
     const rawType: unknown = error.type;
     const named = typeof rawType === 'string' ? KIND_BY_ERROR_TYPE.get(rawType) : undefined;
-    const kind = named ?? (status === undefined ? 'unexpected' : kindForStatus(status));
+    const tooLong =
+      status === 400 && rawType === 'invalid_request_error' && TOO_LONG.test(error.message);
+    const kind = tooLong
+      ? 'context_overflow'
+      : (named ?? (status === undefined ? 'unexpected' : kindForStatus(status)));
     const type = plain(rawType, /^[a-z_]{1,60}$/);
     const requestId = plain(error.requestID, /^[A-Za-z0-9_-]{1,80}$/);
     return new ModelError(

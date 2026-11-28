@@ -130,6 +130,21 @@ export type ModelEvent =
       readonly parts?: readonly MessagePart[];
     };
 
+/** What a model accepts, as its provider states it. A limit it does not state is left out. */
+export interface ModelLimits {
+  /** The most input tokens one request may carry. */
+  readonly contextTokens?: number;
+}
+
+/**
+ * The limits, with every number that cannot be a limit left out. A limit is a
+ * count above zero.
+ */
+export function checkedLimits(reported: { readonly contextTokens?: unknown }): ModelLimits {
+  const { contextTokens } = reported;
+  return isCount(contextTokens) && contextTokens > 0 ? { contextTokens } : {};
+}
+
 /**
  * A language model, as the rest of the core sees it. Each provider is reached
  * through an adapter that implements this interface.
@@ -137,6 +152,12 @@ export type ModelEvent =
 export interface Model {
   /** Streams the reply to a conversation. */
   stream(request: ModelRequest): AsyncIterable<ModelEvent>;
+  /**
+   * Asks the provider for the limits of this model. Left out by an adapter
+   * whose API has no way to ask. Rejects with a `ModelError` when the
+   * provider cannot be asked.
+   */
+  limits?(): Promise<ModelLimits>;
 }
 
 /** What went wrong with a model request, in terms a client can act on. */
@@ -145,6 +166,8 @@ export type ModelErrorKind =
   | 'permission'
   | 'not_found'
   | 'invalid_request'
+  /** The conversation is longer than the model accepts. */
+  | 'context_overflow'
   | 'rate_limit'
   | 'overloaded'
   | 'connection'

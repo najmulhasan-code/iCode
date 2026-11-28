@@ -5,6 +5,7 @@ import {
   CONVERSATION_CREATE_METHOD,
   type ChatDeltaParams,
   type ChatSendResult,
+  type ContextSize,
   type ConversationCreateResult,
   CoreErrorCode,
   ErrorCode,
@@ -40,8 +41,11 @@ import {
   type Model,
   ModelConfigError,
   ModelError,
+  type ModelLimits,
   type ModelUsage,
+  checkedLimits,
   checkedUsage,
+  isCount,
 } from './model.js';
 
 export interface ServerOptions {
@@ -215,6 +219,50 @@ export async function serve(options: ServerOptions): Promise<void> {
    * provider had not finished, such as signed thinking, is never sent back.
    * Any other reply keeps the parts the adapter returned, or its text.
    */
+  /** The limits each model's provider stated, once it has answered. */
+  const limits = new WeakMap<Model, ModelLimits>();
+  const asked = new WeakSet<Model>();
+
+  /**
+   * Asks a model's provider for its limits, once, without making anything
+   * wait for the answer. A failed question is asked again with the next message.
+   */
+  const askLimits = (model: Model): void => {
+    if (model.limits === undefined || asked.has(model)) {
+      return;
+    }
+    asked.add(model);
+    model.limits().then(
+      (stated) => {
+        limits.set(model, checkedLimits(stated));
+      },
+      (error: unknown) => {
+        asked.delete(model);
+        log(`the limits of the model are unknown: ${describe(error)}`);
+      },
+    );
+  };
+
+  /**
+   * Where the conversation stands after a reply. Known only when the reply
+   * was kept whole and the provider counted it.
+   */
+  const contextAfter = (
+    stopReason: StopReason,
+    counts: TokenUsage | undefined,
+    model: Model,
+  ): ContextSize | undefined => {
+    if (counts === undefined || (stopReason !== 'end' && stopReason !== 'max_tokens')) {
+      return undefined;
+    }
+    const usedTokens = counts.inputTokens + counts.outputTokens;
+    if (!isCount(usedTokens)) {
+      return undefined;
+    }
+    const limitTokens = limits.get(model)?.contextTokens;
+    return { usedTokens, ...(limitTokens === undefined ? {} : { limitTokens }) };
+  };
+
   const keptReply = (
     stopReason: StopReason,
     written: string,
@@ -253,6 +301,7 @@ export async function serve(options: ServerOptions): Promise<void> {
     let stopReason: StopReason | undefined;
     let parts: readonly MessagePart[] | undefined;
     let usage: ModelUsage | undefined;
+    askLimits(model);
     try {
       const stream = model.stream({
         messages: turn.messages,
@@ -292,10 +341,14 @@ export async function serve(options: ServerOptions): Promise<void> {
       }
       // Checked again here: a model is not always one of this code base's adapters.
       const counts: TokenUsage | undefined = usage === undefined ? undefined : checkedUsage(usage);
-      const result: ChatSendResult = {
+      let result: ChatSendResult = {
         stopReason: controller.signal.aborted ? 'cancelled' : stopReason,
         ...(counts === undefined ? {} : { usage: counts }),
       };
+      const context = contextAfter(result.stopReason, counts, model);
+      if (context !== undefined) {
+        result = { ...result, context };
+      }
       turn.end(keptReply(result.stopReason, written, parts));
       await reply(request.id, result);
     } catch (error) {

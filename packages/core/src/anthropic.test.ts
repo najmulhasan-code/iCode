@@ -37,7 +37,7 @@ async function standIn(handler: Handler) {
         method: request.method,
         url: request.url,
         headers: request.headers,
-        body: JSON.parse(text) as Record<string, unknown>,
+        body: (text === '' ? {} : JSON.parse(text)) as Record<string, unknown>,
       };
       requests.push(seen);
       handler(response, seen, requests.length);
@@ -373,6 +373,86 @@ describe('a reply', () => {
     }
 
     expect(events).toEqual([{ type: 'text', text: 'partial' }]);
+  });
+});
+
+describe('the limits of a model', () => {
+  const answer = (response: ServerResponse, info: object): void => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ id: 'model-a', type: 'model', ...info }));
+  };
+
+  it('are asked from the provider by the model name', async () => {
+    const api = await standIn((response) => {
+      answer(response, { max_input_tokens: 1_000_000, max_tokens: 128_000 });
+    });
+
+    expect(await modelFor(api.url, { model: 'model-a' }).limits?.()).toEqual({
+      contextTokens: 1_000_000,
+    });
+    expect(api.requests[0]?.method).toBe('GET');
+    expect(api.requests[0]?.url).toMatch(/^\/v1\/models\/model-a/);
+  });
+
+  it.each<[string, unknown]>([
+    ['is not stated', null],
+    ['is zero', 0],
+    ['is negative', -5],
+    ['is text', '1000000'],
+  ])('leave out an input limit that %s', async (_name, value) => {
+    const api = await standIn((response) => {
+      answer(response, { max_input_tokens: value });
+    });
+
+    expect(await modelFor(api.url).limits?.()).toEqual({});
+  });
+
+  it('are reported as a failure, without provider text, when the provider cannot say', async () => {
+    const api = await standIn((response) => {
+      sendError(response, 404, 'not_found_error');
+    });
+
+    const failure = await modelFor(api.url)
+      .limits?.()
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({ name: 'ModelError', kind: 'not_found', status: 404 });
+    expect((failure as Error).message).not.toContain('stand-in');
+  });
+});
+
+describe('a conversation longer than the model accepts', () => {
+  const refuse = (response: ServerResponse, status: number, type: string, message: string) => {
+    response.writeHead(status, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ type: 'error', error: { type, message } }));
+  };
+
+  it('is reported as its own kind of failure, without the provider wording', async () => {
+    const api = await standIn((response) => {
+      refuse(
+        response,
+        400,
+        'invalid_request_error',
+        'prompt is too long: 1000001 tokens > 1000000',
+      );
+    });
+
+    const failure = await collect(modelFor(api.url)).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ name: 'ModelError', kind: 'context_overflow', status: 400 });
+    expect((failure as Error).message).not.toContain('too long');
+  });
+
+  it.each<[string, number, string, string]>([
+    ['another invalid request', 400, 'invalid_request_error', 'max_tokens: must be positive'],
+    ['the same words with another status', 413, 'request_too_large', 'prompt is too long'],
+  ])('is not confused with %s', async (_name, status, type, message) => {
+    const api = await standIn((response) => {
+      refuse(response, status, type, message);
+    });
+
+    await expect(collect(modelFor(api.url))).rejects.toMatchObject({
+      name: 'ModelError',
+      kind: 'invalid_request',
+    });
   });
 });
 
